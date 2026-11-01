@@ -202,10 +202,17 @@ def main() -> int:
                                   capture_output=True, text=True, check=True).stdout.strip()
         subprocess.run(["gh", "release", "delete", "dist", "--cleanup-tag", "--yes", "--repo", repo])
         assets = [os.path.join(out, x) for x in sorted(os.listdir(out))]
+        # Лоадер ещё и под собственным именем: игрок скачивает его из релиза руками, а безымянный
+        # object-<sha256> он сам найдёт по манифесту (start.json).
+        loader = next((f for f in files if f["kind"] == "loader"), None)
+        if loader:
+            named = os.path.join(out, os.path.basename(loader["path"]))
+            shutil.copyfile(os.path.join(home, loader["path"]), named)
+            assets.append(named)
         notes = f"Cursed Recode, сборка {a.build} ({a.version}). {a.notes}".strip()
         subprocess.run(["gh", "release", "create", "dist", *assets, "--repo", repo, "--title", a.title,
                         "--notes", notes, "--latest"], check=True)
-        print(f"релиз `dist` опубликован: {len(assets)} файлов")
+        print(f"релиз `dist` опубликован: {len(assets)} файлов (лоадер - {os.path.basename(loader['path']) if loader else 'нет!'})")
     return 0
 
 
