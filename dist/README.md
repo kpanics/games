@@ -61,5 +61,12 @@ native\target\release\recode_loader.exe --headless --token github --sync
 — лоадер читает `start.json` с GitHub, проверяет подпись, скачивает весь билд (включая `runtime.zip`
 и ассеты Mojang) и сверяет каждый хеш. Это и есть вся связка, кроме окна самой игры.
 
+## Linux (CachyOS и прочие)
+
+`linux-loader/` — нативный синк-лоадер без Win32: та же подпись, синк и распаковка, а игра
+(bin/CursedRecode.exe + JDK из runtime.zip) запускается через Wine (winevulkan). Подробности и
+диагностика — [docs/CACHYOS.md](../docs/CACHYOS.md). Джоба `linux` в CI проверяет его вживую
+на ubuntu-раннере: полный синк дистрибутива с GitHub и ассетов Mojang.
+
 Игроку: скачать `loader/recode_loader.exe` из релиза, запустить (права администратора — так задумано),
 выбрать папку — лоадер скачает всё сам и стартует игру (`Play`).

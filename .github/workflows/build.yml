@@ -260,3 +260,60 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
+
+  # Linux (CachyOS и прочие, docs/CACHYOS.md): нативный синк-лоадер (linux-loader/) и живой тест -
+  # он качает весь дистрибутив с GitHub и ассеты Mojang на ubuntu-раннере, как это сделает игрок.
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          linux-loader/target
+          ~/.cargo/registry
+        key: ${{ runner.os }}-linux-loader-${{ hashFiles('linux-loader/Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-linux-loader-
+
+    - name: Build
+      run: cargo build --release --manifest-path linux-loader/Cargo.toml
+
+    - name: The Linux sync test (весь дистрибутив с GitHub + ассеты Mojang)
+      timeout-minutes: 30
+      run: |
+        mkdir -p "$HOME/test-home"
+        linux-loader/target/release/cursed-linux-loader --home "$HOME/test-home" --sync-only
+        du -sh "$HOME/test-home"
+        test -f "$HOME/test-home/bin/CursedRecode.exe" || { echo "нет бинарей"; exit 1; }
+        test -d "$HOME/test-home/runtime/bin" || { echo "runtime не распакован"; exit 1; }
+        ls "$HOME/test-home/game" | head -3
+        echo "Linux-синк живой: подпись, билд, ассеты и распаковка - всё сошлось"
+
+  diagnostics-linux:
+    needs: linux
+    if: always() && needs.linux.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+    - name: Logs to an issue
+      run: |
+        JOB_ID=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.name=="linux") | .id' | head -1)
+        gh run view --job "$JOB_ID" --log > diag.log 2> view.err || true
+        [ -s diag.log ] || curl -sL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GH_REPO/actions/jobs/$JOB_ID/logs" -o diag.log
+        { echo '```'; cat view.err 2>/dev/null; echo '```'; echo; tail -c 55000 diag.log; } > diag.md
+        gh issue create --title "CI logs: run $RUN_ID (linux)" --body-file diag.md || true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
