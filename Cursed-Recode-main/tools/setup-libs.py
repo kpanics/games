@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +24,6 @@ FABRIC_API_URL = "https://cdn.modrinth.com/data/P7dR8mSH/versions/bNnaTiuM/fabri
 FABRIC_API_FILE = "fabric-api-0.161.0+26.3.jar"
 MIXINEXTRAS = ("io.github.llamalad7", "mixinextras-fabric", "0.5.5")
 FABRIC_MAVEN = "https://maven.fabricmc.net/"
-VIA_MAVEN = "https://repo.viaversion.com/"
 VIA = [
     ("com/viaversion/viaversion-api/5.12.1/viaversion-api-5.12.1.jar", "ed26996ea02a86e1b948e4569b93c4a738726b8c"),
     ("com/viaversion/viaversion-common/5.12.1/viaversion-common-5.12.1.jar", "01aa06e440d567b9fdd39803e1a5f2edb4b29f79"),
@@ -50,12 +50,28 @@ def sha1(path):
     return h.hexdigest()
 
 
+# Серверы, откуда берутся ViaVersion-артефакты: repo.viaversion.com режет 403 запросам из диапазонов
+# GitHub Actions, Maven Central и зеркало PaperMC - нет. Порядок = что пробуем сначала.
+VIA_SOURCES = [
+    "https://repo1.maven.org/maven2/",
+    "https://repo.viaversion.com/",
+    "https://repo.papermc.io/repository/maven-public/",
+]
+
+UA = "cursed-recode-setup-libs/1.0 (+https://github.com/kpanics/games)"
+
+
+def _request(url, timeout=60):
+    return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout)
+
+
 def fetch(url, dst):
     print("  download", url)
     last = None
     for _ in range(3):
         try:
-            urllib.request.urlretrieve(url, dst)
+            with _request(url) as r, open(dst, "wb") as f:
+                shutil.copyfileobj(r, f)
             return
         except Exception as e:
             last = e
@@ -64,26 +80,27 @@ def fetch(url, dst):
 
 
 def get_json(url):
-    with urllib.request.urlopen(url) as r:
+    with _request(url) as r:
         return json.load(r)
 
 
-def fabric_api_url():
-    """Последняя fabric-api под нашу версию Minecraft из API Modrinth; не ответил — закреплённый файл
-    (cdn.modrinth.com умеет менять выдачу, api.modrinth.com — нет)."""
+def fabric_api_urls():
+    """Откуда брать fabric-api, по порядку: API Modrinth (последняя под нашу версию MC), закреплённый
+    файл cdn.modrinth.com, maven Fabric с версией закреплённого файла."""
+    urls = []
     try:
-        with urllib.request.urlopen(
-            f"https://api.modrinth.com/v2/project/P7dR8mSH/version?game_versions=%5B%22{MC_VERSION}%22%5D",
-            timeout=20,
-        ) as r:
+        with _request(f"https://api.modrinth.com/v2/project/P7dR8mSH/version?game_versions=%5B%22{MC_VERSION}%22%5D", timeout=20) as r:
             versions = json.load(r)
         files = next(v["files"] for v in versions if v.get("loaders") and "fabric" in v["loaders"])
         url = next(f["url"] for f in files if f.get("primary")) or files[0]["url"]
         print("  fabric-api:", url.rsplit("/", 1)[-1])
-        return url
+        urls.append(url)
     except Exception as e:
-        print("  modrinth api не ответил, пробуем закреплённый файл:", e)
-        return FABRIC_API_URL
+        print("  modrinth api не ответил:", e)
+    urls.append(FABRIC_API_URL)
+    quoted = urllib.parse.quote(FABRIC_API_FILE)
+    urls.append(f"https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/{quoted}/{quoted}")
+    return urls
 
 
 def loader_profile():
@@ -167,11 +184,24 @@ def main():
     print("minecraft libraries:", n)
 
     # servers of older versions (cursed.recode.via.Via): ViaVersion and ViaLoader, beside the game's libraries (they go
-    # with them to a player's libraries/)
+    # with them to a player's libraries/). Пробуем по очереди: главный repo режет 403 с GitHub Actions.
     for path, digest in VIA:
         dst = p("libs", "mc", path.rsplit("/", 1)[1])
         if not (os.path.exists(dst) and sha1(dst) == digest):
-            fetch(VIA_MAVEN + path, dst)
+            got = False
+            for base in VIA_SOURCES:
+                try:
+                    fetch(base + path, dst)
+                except SystemExit as e:
+                    print(f"  источник {base} не дал: {e}")
+                    continue
+                if sha1(dst) == digest:
+                    got = True
+                    break
+                print(f"  {base} дал не те байты (sha1 не сходится)")
+                os.remove(dst)
+            if not got:
+                raise SystemExit(f"[setup-libs] ViaVersion не досталась ниоткуда: {path}")
         assert sha1(dst) == digest, path
     print("via:", len(VIA))
 
@@ -215,7 +245,17 @@ def main():
     # --- Fabric API: nested module jars onto the classpath (+ sources) ---
     fat = p("tools", FABRIC_API_FILE)
     if not os.path.exists(fat):
-        fetch(fabric_api_url(), fat)
+        for url in fabric_api_urls():
+            try:
+                fetch(url, fat)
+                zipfile.ZipFile(fat).namelist()  # не zip - пробуем следующий источник
+                break
+            except SystemExit as e:
+                print(f"  источник не дал: {e}")
+            except zipfile.BadZipFile:
+                print(f"  {url} - не zip, пробуем дальше")
+        else:
+            raise SystemExit("[setup-libs] fabric-api не досталась ниоткуда")
     with zipfile.ZipFile(fat) as z:
         nested = [x for x in z.namelist() if x.startswith("META-INF/jars/") and x.endswith(".jar")]
         for x in nested:
