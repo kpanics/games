@@ -426,13 +426,13 @@ fn unpack_zip(object: &Path, into: &Path) -> Result<(), String> {
     let names: Vec<PathBuf> = (0..archive.len())
         .filter_map(|i| {
             let e = archive.by_index(i).ok()?;
-            (!e.is_dir()).then(|| e.enclosed_name().map(Path::to_path_buf)).flatten()
+            (!e.is_dir()).then(|| e.enclosed_name()).flatten()
         })
         .collect();
     // the one top-level folder, if every member sits under one and the same
     let peel = {
-        let mut tops = names.iter().map(|n| n.components().next()).collect::<std::collections::BTreeSet<_>>();
-        tops.len() == 1 && tops.pop().flatten().is_some() && names.iter().any(|n| n.components().count() >= 2)
+        let tops = names.iter().map(|n| n.components().next()).collect::<std::collections::BTreeSet<_>>();
+        tops.len() == 1 && tops.iter().next().is_some_and(|t| t.is_some()) && names.iter().any(|n| n.components().count() >= 2)
     };
     for name in &names {
         let rel: PathBuf = if peel { name.components().skip(1).collect() } else { name.clone() };
