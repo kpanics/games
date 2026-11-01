@@ -122,12 +122,10 @@ jobs:
     steps:
     - name: Logs to an issue
       run: |
-        set -x
-        gh run view "$RUN_ID" --log > diag.log 2> view.err || true
-        gh api "repos/$GH_REPO/actions/runs/$RUN_ID/logs" > logs.zip 2> api.err || true
-        unzip -o -q logs.zip -d logs 2>/dev/null || true
-        cat logs/*/* logs/* 2>/dev/null | tail -c 60000 >> diag.log || true
-        { echo '\`\`\`'; cat view.err api.err 2>/dev/null; echo '\`\`\`'; echo; tail -c 55000 diag.log; } > diag.md
+        JOB_ID=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.name=="build") | .id' | head -1)
+        gh run view --job "$JOB_ID" --log > diag.log 2> view.err || true
+        [ -s diag.log ] || curl -sL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GH_REPO/actions/jobs/$JOB_ID/logs" -o diag.log
+        { echo '\`\`\`'; cat view.err 2>/dev/null; echo '\`\`\`'; echo; tail -c 55000 diag.log; } > diag.md
         gh issue create --title "CI logs: run $RUN_ID (build)" --body-file diag.md || true
       env:
         GH_TOKEN: ${{ github.token }}
@@ -250,12 +248,10 @@ jobs:
     steps:
     - name: Logs to an issue
       run: |
-        set -x
-        gh run view "$RUN_ID" --log > diag.log 2> view.err || true
-        gh api "repos/$GH_REPO/actions/runs/$RUN_ID/logs" > logs.zip 2> api.err || true
-        unzip -o -q logs.zip -d logs 2>/dev/null || true
-        cat logs/*/* logs/* 2>/dev/null | tail -c 60000 >> diag.log || true
-        { echo '\`\`\`'; cat view.err api.err 2>/dev/null; echo '\`\`\`'; echo; tail -c 55000 diag.log; } > diag.md
+        JOB_ID=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.name=="dist") | .id' | head -1)
+        gh run view --job "$JOB_ID" --log > diag.log 2> view.err || true
+        [ -s diag.log ] || curl -sL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GH_REPO/actions/jobs/$JOB_ID/logs" -o diag.log
+        { echo '\`\`\`'; cat view.err 2>/dev/null; echo '\`\`\`'; echo; tail -c 55000 diag.log; } > diag.md
         gh issue create --title "CI logs: run $RUN_ID (dist)" --body-file diag.md || true
       env:
         GH_TOKEN: ${{ github.token }}
