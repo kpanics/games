@@ -129,6 +129,7 @@ jobs:
         fi
       env:
         GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
 
   # Дистрибутив «на GitHub»: только push в main. Собирает билд с вшитой базой и ключом,
@@ -254,4 +255,5 @@ jobs:
         fi
       env:
         GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
