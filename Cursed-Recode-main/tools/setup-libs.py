@@ -53,9 +53,9 @@ def sha1(path):
 # Серверы, откуда берутся ViaVersion-артефакты: repo.viaversion.com режет 403 запросам из диапазонов
 # GitHub Actions, Maven Central и зеркало PaperMC - нет. Порядок = что пробуем сначала.
 VIA_SOURCES = [
-    "https://repo1.maven.org/maven2/",
     "https://repo.viaversion.com/",
     "https://repo.papermc.io/repository/maven-public/",
+    "https://repo1.maven.org/maven2/",
 ]
 
 UA = "cursed-recode-setup-libs/1.0 (+https://github.com/kpanics/games)"
@@ -286,4 +286,9 @@ def main():
 
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     sys.exit(main())
