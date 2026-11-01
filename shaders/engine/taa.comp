@@ -1,0 +1,170 @@
+#version 450
+// The world's frames put together (engine/upscale.rs): this frame, drawn smaller and moved by a fraction of a pixel,
+// and the frames before it, moved to where they are now (by the depth and the camera's move) and held within what
+// this frame shows round the pixel — so nothing that moved leaves a trail. Written at the window's size.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// The small picture round this group's 16x16 pixels (colour, depth), read once: at most 16 + 3 texels a side.
+const int TILE = 20;
+shared vec4 tile[TILE * TILE];
+
+layout(set = 0, binding = 0) uniform sampler2D Color;
+layout(set = 0, binding = 1) uniform sampler2D Depth;
+layout(set = 0, binding = 2) uniform sampler2D History;
+layout(set = 0, binding = 3, rgb10_a2) uniform writeonly image2D Out;
+layout(set = 0, binding = 5) uniform sampler2D Air;
+layout(set = 0, binding = 6) uniform sampler2D Glow;
+layout(std140, set = 0, binding = 4) uniform Taa {
+    // Clip space back to round the camera, this frame as drawn (moved).
+    mat4 InvViewProj;
+    // The previous frame's, not moved, round its camera.
+    mat4 PrevViewProj;
+    // The camera's move since the previous frame (xyz); w 1 when there is a previous frame.
+    vec4 CameraDelta;
+    // This frame's move in pixels of the small picture (xy); z how much of this frame goes in.
+    vec4 Jitter;
+    // Out width, height; in width, height.
+    ivec4 Sizes;
+};
+
+vec3 to_ycocg(vec3 c) {
+    return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+
+vec3 from_ycocg(vec3 c) {
+    return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
+}
+
+// Catmull-Rom in five bilinear samples.
+vec3 catmull_rom(sampler2D tex, vec2 uv, vec2 size) {
+    vec2 at = uv * size;
+    vec2 t1 = floor(at - 0.5) + 0.5;
+    vec2 f = at - t1;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 t12 = (t1 + w2 / w12) / size;
+    vec2 t0 = (t1 - 1.0) / size;
+    vec2 t3 = (t1 + 2.0) / size;
+    vec3 r = textureLod(tex, vec2(t12.x, t0.y), 0.0).rgb * (w12.x * w0.y)
+           + textureLod(tex, vec2(t0.x, t12.y), 0.0).rgb * (w0.x * w12.y)
+           + textureLod(tex, t12, 0.0).rgb * (w12.x * w12.y)
+           + textureLod(tex, vec2(t3.x, t12.y), 0.0).rgb * (w3.x * w12.y)
+           + textureLod(tex, vec2(t12.x, t3.y), 0.0).rgb * (w12.x * w3.y);
+    float w = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    return max(r / w, vec3(0.0));
+}
+
+void main() {
+    vec2 inSize = vec2(Sizes.zw);
+    vec2 scale = inSize / vec2(Sizes.xy);
+    ivec2 g0 = ivec2(gl_WorkGroupID.xy) * 16;
+    ivec2 t0 = ivec2(floor((vec2(g0) + 0.5) * scale + Jitter.xy)) - 1;
+    for (int i = int(gl_LocalInvocationIndex); i < TILE * TILE; i += 256) {
+        ivec2 t = clamp(t0 + ivec2(i % TILE, i / TILE), ivec2(0), Sizes.zw - 1);
+        tile[i] = vec4(texelFetch(Color, t, 0).rgb, texelFetch(Depth, t, 0).r);
+    }
+    barrier();
+    ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+    if (o.x >= Sizes.x || o.y >= Sizes.y) {
+        return;
+    }
+    vec2 uv = (vec2(o) + 0.5) / vec2(Sizes.xy);
+    // Where this point is in the small picture as drawn (moved by the jitter).
+    vec2 p = (vec2(o) + 0.5) * scale + Jitter.xy;
+    ivec2 n = ivec2(floor(p));
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    vec3 m1 = vec3(0.0);
+    vec3 airAdd = vec3(0.0);
+    float airKeep = 1.0;
+    vec3 m2 = vec3(0.0);
+    vec3 lo = vec3(1e9);
+    vec3 hi = vec3(-1e9);
+    float closest = -1.0;
+    ivec2 closestAt = n;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 t = n + ivec2(dx, dy);
+            ivec2 l = clamp(t - t0, ivec2(0), ivec2(TILE - 1));
+            vec4 s = tile[l.y * TILE + l.x];
+            vec3 c = s.rgb;
+            vec3 y = to_ycocg(c);
+            lo = min(lo, y);
+            hi = max(hi, y);
+            m1 += y;
+            m2 += y * y;
+            vec2 d = vec2(t) + 0.5 - p;
+            float w = exp(-2.29 * dot(d, d));
+            sum += c * w;
+            wsum += w;
+            if (s.a > closest) {
+                closest = s.a;
+                closestAt = clamp(t, ivec2(0), Sizes.zw - 1);
+            }
+        }
+    }
+    vec3 current = sum / max(wsum, 1e-5);
+    int extras = int(Jitter.w + 0.5);
+    // The glow round glowing blocks (glow.comp).
+    if ((extras & 2) != 0) {
+        vec3 glow = textureLod(Glow, p / inSize, 0.0).rgb * 1.9;
+        current += glow;
+        vec3 add = to_ycocg(glow);
+        lo += add;
+        hi += add;
+        m1 += add * 9.0;
+        airAdd += glow;
+    }
+    // The light in the air (volume.comp): what still comes through, plus what the air scatters.
+    if ((extras & 1) != 0) {
+        vec4 air = textureLod(Air, p / inSize, 0.0);
+        float keep = mix(1.0, air.a, 0.45);
+        current = current * keep + air.rgb;
+        vec3 add = to_ycocg(air.rgb);
+        lo = lo * keep + add;
+        hi = hi * keep + add;
+        m1 = m1 * keep + add * 9.0;
+        m2 = m2 * keep * keep;
+        airAdd = airAdd * keep + air.rgb;
+        airKeep = keep;
+    }
+    vec3 mean = m1 / 9.0;
+    vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
+    // The history is held within what this frame shows round the pixel: the full box of the 3x3 (a tighter box
+    // throws away good history at every texture detail, and far detail flickers).
+    vec3 pad = 0.25 * sigma;
+    lo -= pad;
+    hi += pad;
+
+    // The nearest thing round the pixel decides how it moved (edges keep the thing in front).
+    vec2 drawn = (vec2(closestAt) + 0.5) / inSize;
+    vec4 wp = InvViewProj * vec4(drawn * 2.0 - 1.0, max(closest, 1e-7), 1.0);
+    vec3 pos = wp.xyz / wp.w;
+    vec4 prev = PrevViewProj * vec4(pos + CameraDelta.xyz, 1.0);
+    vec2 prevUv = prev.xy / prev.w * 0.5 + 0.5;
+    vec2 nowUv = (vec2(closestAt) + 0.5 - Jitter.xy) / inSize;
+    vec2 historyUv = uv + (prevUv - nowUv);
+
+    vec3 result = current;
+    if (CameraDelta.w > 0.5 && prev.w > 0.0 && all(greaterThanEqual(historyUv, vec2(0.0))) && all(lessThanEqual(historyUv, vec2(1.0)))) {
+        vec3 history = catmull_rom(History, historyUv, vec2(Sizes.xy));
+        history = from_ycocg(clamp(to_ycocg(history), lo, hi));
+        // This frame gives the one sample that fell nearest this pixel, as much as it is near (in this picture's
+        // pixels): over the frames, with the jitter, the samples land all over the pixel and the detail comes back.
+        ivec2 l = clamp(n - t0, ivec2(0), ivec2(TILE - 1));
+        vec3 nearest = tile[l.y * TILE + l.x].rgb * airKeep + airAdd;
+        vec2 d = (vec2(n) + 0.5 - p) / scale;
+        float near = exp(-dot(d, d) / (2.0 * 0.35 * 0.35));
+        // Still pixels keep their history longer (no shimmer), moving ones take this frame sooner (no trail).
+        float moved = length((historyUv - uv) * vec2(Sizes.xy));
+        float base = mix(0.4, 1.2, smoothstep(0.0, 2.0, moved)) * Jitter.z;
+        float alpha = clamp(base * near, 0.015, 1.0);
+        result = mix(history, nearest, alpha);
+    }
+    // 10 bits a channel, 0..1: what is brighter (glow, air) is held at white.
+    imageStore(Out, o, vec4(clamp(result, 0.0, 1.0), 1.0));
+}
