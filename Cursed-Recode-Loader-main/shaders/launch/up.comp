@@ -1,0 +1,18 @@
+// The glow, up: the smaller level spread with a tent of nine taps (in its own texels), added into this one.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D uA;
+layout(set = 0, binding = 3, rgba16f) uniform image2D Level;
+layout(push_constant) uniform Step {
+    vec4 Info;     // the source's texel (x, y), this level's size
+    ivec4 First;
+};
+void main(){
+  ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+  if (q.x >= int(Info.z) || q.y >= int(Info.w)) return;
+  vec2 uv = (vec2(q) + .5) / Info.zw; vec2 t = Info.xy;
+  vec3 c = textureLod(uA, uv, 0.).rgb * 4.
+    + (textureLod(uA, uv + vec2(t.x, 0.), 0.).rgb + textureLod(uA, uv - vec2(t.x, 0.), 0.).rgb + textureLod(uA, uv + vec2(0., t.y), 0.).rgb + textureLod(uA, uv - vec2(0., t.y), 0.).rgb) * 2.
+    + textureLod(uA, uv + t, 0.).rgb + textureLod(uA, uv - t, 0.).rgb + textureLod(uA, uv + vec2(t.x, -t.y), 0.).rgb + textureLod(uA, uv + vec2(-t.x, t.y), 0.).rgb;
+  // the glow adds the level below into this one; the background's blur (First 2) takes it instead
+  imageStore(Level, q, vec4((First.x == 2 ? vec3(0.) : imageLoad(Level, q).rgb) + c / 16., 1.));
+}

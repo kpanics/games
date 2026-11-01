@@ -52,12 +52,49 @@ def sha1(path):
 
 def fetch(url, dst):
     print("  download", url)
-    urllib.request.urlretrieve(url, dst)
+    last = None
+    for _ in range(3):
+        try:
+            urllib.request.urlretrieve(url, dst)
+            return
+        except Exception as e:
+            last = e
+            print("  again:", e)
+    raise SystemExit(f"[setup-libs] не скачалось: {url}: {last}")
 
 
 def get_json(url):
     with urllib.request.urlopen(url) as r:
         return json.load(r)
+
+
+def fabric_api_url():
+    """Последняя fabric-api под нашу версию Minecraft из API Modrinth; не ответил — закреплённый файл
+    (cdn.modrinth.com умеет менять выдачу, api.modrinth.com — нет)."""
+    try:
+        with urllib.request.urlopen(
+            f"https://api.modrinth.com/v2/project/P7dR8mSH/version?game_versions=%5B%22{MC_VERSION}%22%5D",
+            timeout=20,
+        ) as r:
+            versions = json.load(r)
+        files = next(v["files"] for v in versions if v.get("loaders") and "fabric" in v["loaders"])
+        url = next(f["url"] for f in files if f.get("primary")) or files[0]["url"]
+        print("  fabric-api:", url.rsplit("/", 1)[-1])
+        return url
+    except Exception as e:
+        print("  modrinth api не ответил, пробуем закреплённый файл:", e)
+        return FABRIC_API_URL
+
+
+def loader_profile():
+    """Профиль Fabric Loader под нашу версию; если закреплённый лоудер не подошёл — последний стабильный."""
+    try:
+        return get_json(f"https://meta.fabricmc.net/v2/versions/loader/{MC_VERSION}/{LOADER_VERSION}/profile/json")
+    except Exception as e:
+        print(f"  loader {LOADER_VERSION} под {MC_VERSION} не нашёлся ({e}), берём последний стабильный")
+    latest = next(v["version"] for v in get_json("https://meta.fabricmc.net/v2/versions/loader") if v.get("stable"))
+    print("  loader:", latest)
+    return get_json(f"https://meta.fabricmc.net/v2/versions/loader/{MC_VERSION}/{latest}/profile/json")
 
 
 def allowed_on_windows(rules):
@@ -139,7 +176,7 @@ def main():
     print("via:", len(VIA))
 
     # --- Fabric Loader + deps (from the launcher profile json) ---
-    prof = get_json(f"https://meta.fabricmc.net/v2/versions/loader/{MC_VERSION}/{LOADER_VERSION}/profile/json")
+    prof = loader_profile()
     for lib in prof["libraries"]:
         g, a, ver = lib["name"].split(":")
         if a == "intermediary":
@@ -178,7 +215,7 @@ def main():
     # --- Fabric API: nested module jars onto the classpath (+ sources) ---
     fat = p("tools", FABRIC_API_FILE)
     if not os.path.exists(fat):
-        fetch(FABRIC_API_URL, fat)
+        fetch(fabric_api_url(), fat)
     with zipfile.ZipFile(fat) as z:
         nested = [x for x in z.namelist() if x.startswith("META-INF/jars/") and x.endswith(".jar")]
         for x in nested:

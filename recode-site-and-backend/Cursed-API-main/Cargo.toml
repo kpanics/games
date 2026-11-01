@@ -1,0 +1,39 @@
+[package]
+name = "cursed-api"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The accounts of cursedclient.xyz: registration, sign-in, sessions for the site, tokens for the loader."
+
+[dependencies]
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }  # the OS random source (argon2 leaves it off)
+axum = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"
+# The seal on the loader's and the game's words (seal.rs): the system's AES-GCM on the client, this one here.
+aes-gcm = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+# The live line (live.rs): a stream made of what comes down a channel.
+futures-util = { version = "0.3", default-features = false }
+# The market: archives, pictures, the disk.
+crc32fast = "1"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+libc = "0.2"
+png = "0.17"
+# The blocklist: the list signed for the client, the servers looked up (SRV records).
+ed25519-dalek = "2"
+# The beta's downloads: the game's assets are named by their SHA-1.
+sha1 = "0.10"
+# FreeKassa signs its payments with md5 (pay.rs).
+md-5 = "0.10"
+hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
+# The forum's YouTube cards: the title from oEmbed, the picture kept here.
+ureq = { version = "2", features = ["json"] }
+
+[profile.release]
+strip = true

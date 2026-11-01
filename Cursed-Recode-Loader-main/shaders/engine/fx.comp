@@ -1,0 +1,1004 @@
+#version 450
+// The world's effects (engine/fx.rs): shapes of light the modules put in the world, drawn over the level's picture
+// against its depth (what is nearer hides them; one marked XRAY shows faintly through).
+//   SEG a segment of light, DOT a lamp: a core as thick as it is (never thinner than a pixel's worth of light: a far
+//     one is fainter, not thicker) and a glow round it.
+//   RING a ring laid on what is there: the level's surface where it is as far from the ring's middle as the ring is
+//     wide round, within its band up and down (it follows the blocks, climbs a wall it meets); a light inside it.
+//   GRID a grid laid on the surface, its lines every so many blocks (chunks' borders), the cell of its middle lit.
+//   WALL a wall of glass (a corner and its two sides) with a grid on it, its major lines brighter.
+//   CONE a cone of glass (its tip, which way and how far its base is, its base's radius): what is behind it bent a
+//     touch, tinted, brighter at a grazing look, a light caught, its rim a line of light.
+//   BOX a box's faces, tinted, brighter at a grazing look.
+//   SPRITE a small shape turned to the camera: round, a leaf, a flake, an ember; narrowed across as much as it says.
+//   RIBBON a piece of a ribbon of light: from one point to the next, as wide each side of them as each says, across one
+//     way; brighter toward its edges, a flow running along it.
+//   STAMP a mark laid on the surface: a footprint (its sole and heel), turned the way it goes.
+//   FOG a layer of fog low over the ground: between two heights, thicker toward its bottom, in wisps the wind drifts.
+//   TEXT a letter standing in the world: a quad from its top left corner across and down, its distance field from the
+//     menu's atlas (their sizes in Spare), sharp at any distance, a glow round it.
+//   PART a particle of the weather's (World Effects, native/src/weather): a quad of a frame of its atlas (Parts, the
+//     frames' places in Frames), blended into the next frame, coloured as Source 2's sprite cards colour theirs —
+//     the texture times its colour, held under white, times its alpha — added to the picture or laid over it.
+//   BLUR the picture smeared along the way each pixel moved on the frame since the last (where it was found from its
+//     depth and last frame's matrix): the camera's motion blur.
+// Over a copy of the frame's rectangle that holds them all, laid back after; each group of 8 by 8 pixels first keeps
+// the shapes whose rectangle reaches it.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform image2D Canvas;
+layout(set = 0, binding = 1) uniform sampler2D Depth;
+layout(set = 0, binding = 2) uniform sampler2D Scene;
+layout(std140, set = 0, binding = 3) uniform U {
+    mat4 ViewProj;
+    mat4 InvViewProj;
+    // x seconds, y how many shapes, z the frame's width, w its height
+    vec4 Info;
+    ivec4 Rect;
+    // the camera's right (w pixels a block is at a block's distance), up, the way it looks
+    vec4 Right;
+    vec4 Up;
+    vec4 Forward;
+    // the camera's block in the world, where in it the camera is
+    ivec4 CamBlock;
+    vec4 CamFrac;
+    vec4 Spare;
+    // last frame's matrix; the camera's move from then to now (xyz), this frame's time against a 60th of a second (w,
+    // 0: no last frame)
+    mat4 PrevViewProj;
+    vec4 Motion;
+    // the weather's atlas: its size, its smaller levels, w 1 when it is there
+    vec4 PartsInfo;
+    // the shapes' squares (engine/fx.rs bins): how many across, where the lists start in Bins, their size (pixels)
+    ivec4 BinInfo;
+    // the weather's own colour (linear), w 1 when its particles are painted it
+    vec4 Recolour;
+};
+struct Shape {
+    vec4 v[4];
+    vec4 colour;
+    vec4 rect;
+};
+layout(std430, set = 0, binding = 4) readonly buffer S {
+    Shape shapes[];
+};
+// the menu's letters: its faces' distance fields, the system fonts' letters' (gui/render.rs)
+layout(set = 0, binding = 5) uniform sampler2D Letters0;
+layout(set = 0, binding = 6) uniform sampler2D Letters1;
+// the weather's textures, and where each of their frames lies in them (u0, v0, u1, v1)
+layout(set = 0, binding = 7) uniform sampler2D Parts;
+layout(std430, set = 0, binding = 8) readonly buffer F {
+    vec4 Frames[];
+};
+// each square's first entry (and the next's), then the shapes reaching it, in their order
+layout(std430, set = 0, binding = 9) readonly buffer B {
+    uint Bins[];
+};
+layout(push_constant) uniform P {
+    int Stage;
+};
+
+const uint KEEP = 96u;
+// how many reaching a group are looked at (the lowest KEEP of them drawn)
+const uint SEEN = 256u;
+const int SEG = 0;
+const int DOT = 1;
+const int RING = 2;
+const int GRID = 3;
+const int WALL = 4;
+const int CONE = 5;
+const int BOX = 6;
+const int SPRITE = 7;
+const int RIBBON = 8;
+const int STAMP = 9;
+const int FOG = 10;
+const int BLUR = 11;
+const int TEXT = 12;
+const int PART = 13;
+// a particle added to the picture, faded where it meets what is behind it, its colour held under white, its
+// texture's alpha mapped from a range, a trail fading to its tail
+const int PART_ADD = 2;
+const int PART_FEATHER = 4;
+const int PART_SATURATE = 8;
+const int PART_REMAP = 16;
+const int PART_TRAIL = 32;
+// a letter from the second atlas (the system fonts' letters)
+const int PAGE1 = 16384;
+const int XRAY = 1;
+const int FADE_ENDS = 2;
+// a wall not faded toward its ends
+const int NO_FADE = 4;
+// a segment: a light running round (v[2].xy the middle it runs round, z its speed); its colour going to the second
+// along it (GRADIENT) or round (SHIMMER), the second packed in v[3].w; what of it is hidden shown dashed (v[2].w the
+// dash's length)
+const int RUN = 8;
+const int SHIMMER = 16;
+const int GRADIENT = 32;
+const int DASH = 64;
+// a segment no thicker on the frame close by than a few pixels (an outline's edge)
+const int THIN = 128;
+// a ring stopped where a wall or a drop met it: how far it reaches each of 16 ways, packed in v[2] (5 bits a way, four
+// ways a number, 0.3 blocks a step)
+const int CLIPPED = 256;
+// a ring bending the picture round its edge, as hot air or a shock would (v[1].w its style's bits: see RING)
+const int BEND = 512;
+// a sprite of matter (dust), laid over the picture, not light added to it
+const int SOLID = 1024;
+// a cone: a light going round it; lit from inside (a lantern's)
+const int SWEEP = 2048;
+const int INNER = 4096;
+const float PI = 3.14159265;
+
+shared uint kept;
+shared uint keep[SEEN];
+// the kept shapes themselves, read by every pixel of the group
+shared Shape cache[KEEP];
+
+vec3 to_linear(vec3 c) {
+    return pow(max(c, 0.0), vec3(2.2));
+}
+
+vec3 to_srgb(vec3 c) {
+    return pow(max(c, 0.0), vec3(1.0 / 2.2));
+}
+
+// The second colour packed in a float (its 24 bits and one): linear.
+vec3 unpacked(float f) {
+    int c = int(f + 0.5) - 1;
+    return to_linear(vec3((c >> 16) & 255, (c >> 8) & 255, c & 255) / 255.0);
+}
+
+// How far a clipped ring reaches the way `ang` (radians round from +x toward +z).
+float sector_reach(vec4 packed, float ang) {
+    float a = (ang + PI) / (2.0 * PI) * 16.0;
+    int i0 = int(floor(a)) & 15;
+    int i1 = (i0 + 1) & 15;
+    int b0 = int(packed[i0 >> 2] + 0.5);
+    int b1 = int(packed[i1 >> 2] + 0.5);
+    float r0 = float((b0 >> ((i0 & 3) * 5)) & 31) * 0.3;
+    float r1 = float((b1 >> ((i1 & 3) * 5)) & 31) * 0.3;
+    return mix(r0, r1, fract(a));
+}
+
+float hash12(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * 0.1031);
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+
+vec2 hash22(vec2 p) {
+    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.xx + q.yz) * q.zy);
+}
+
+// Smooth noise over the plane (0..1).
+float noise2(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash12(i);
+    float b = hash12(i + vec2(1.0, 0.0));
+    float c = hash12(i + vec2(0.0, 1.0));
+    float d = hash12(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+vec3 ray_at(vec2 px, float dz) {
+    vec2 uv = px / Info.zw;
+    vec4 wp = InvViewProj * vec4(uv * 2.0 - 1.0, max(dz, 1e-7), 1.0);
+    return wp.xyz / wp.w;
+}
+
+// The ray along `rd` and the segment a..b: how far apart at their nearest, how far along the ray (t), where along it (u).
+float apart(vec3 rd, vec3 a, vec3 b, out float t, out float u) {
+    vec3 ab = b - a;
+    float e = dot(ab, ab);
+    float k = dot(rd, ab);
+    float c = dot(rd, a);
+    float f = dot(ab, a);
+    float den = e - k * k;
+    u = den > 1e-9 ? clamp((c * k - f) / den, 0.0, 1.0) : 0.0;
+    t = max(c + u * k, 0.0);
+    u = e > 1e-12 ? clamp((t * k - f) / e, 0.0, 1.0) : 0.0;
+    vec3 q = a + ab * u;
+    t = max(dot(q, rd), 0.0);
+    return length(rd * t - q);
+}
+
+// How much of a thing `t` along the ray is seen: none behind what the level has nearer (XRAY: a little).
+float seen_at(float t, float far, bool xray) {
+    float s = 1.0 - smoothstep(far - 0.03, far + 0.14, t);
+    return xray ? max(s, 0.22) : s;
+}
+
+// A line of `w` blocks seen `pf` blocks a pixel: its core (never thinner than a pixel's worth of light).
+float line_core(float d, float w, float pf) {
+    float rc = max(w, pf * 0.7);
+    return (w / rc) * (1.0 - smoothstep(rc - pf * 0.5, rc + pf * 0.5, d));
+}
+
+// The soft dark round a line (a light line on a light ground still read, as text's shadow does): how much of it here.
+float line_rim(float d, float w, float pf) {
+    float r = max(w, pf * 0.7) * 2.6 + pf * 1.6;
+    return 1.0 - smoothstep(r * 0.35, r, d);
+}
+
+void main() {
+    uint li = gl_LocalInvocationIndex;
+    if (li == 0u) {
+        kept = 0u;
+    }
+    barrier();
+    vec2 lo = vec2(Rect.xy + ivec2(gl_WorkGroupID.xy * 8u));
+    vec2 hi = lo + 8.0;
+    // only the shapes of this group's square
+    ivec2 sq = ivec2(gl_WorkGroupID.xy * 8u) / BinInfo.z;
+    uint b = uint(sq.y * BinInfo.x + sq.x);
+    uint b0 = Bins[b];
+    uint b1 = Bins[b + 1u];
+    uint base = uint(BinInfo.y);
+    for (uint e = b0 + li; e < b1; e += 64u) {
+        uint i = Bins[base + e];
+        vec4 r = shapes[i].rect;
+        if (r.x < hi.x && r.z > lo.x && r.y < hi.y && r.w > lo.y) {
+            uint at = atomicAdd(kept, 1u);
+            if (at < SEEN) {
+                keep[at] = i;
+            }
+        }
+    }
+    barrier();
+    // in the shapes' own order (the same every frame, so matter and fog lie alike over each other), the lowest when
+    // too many reach the group (always the same ones left out)
+    uint found = min(kept, SEEN);
+    uint count = min(found, KEEP);
+    for (uint i = li; i < found; i += 64u) {
+        uint mine = keep[i];
+        uint rank = 0u;
+        for (uint j = 0u; j < found; j++) {
+            rank += keep[j] < mine ? 1u : 0u;
+        }
+        if (rank < KEEP) {
+            cache[rank] = shapes[mine];
+        }
+    }
+    barrier();
+
+    ivec2 px = Rect.xy + ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= Rect.z || px.y >= Rect.w) {
+        return;
+    }
+    if (count == 0u) {
+        return;
+    }
+    vec2 uv = (vec2(px) + 0.5) / Info.zw;
+    float dz = textureLod(Depth, uv, 0.0).r;
+    bool surface = dz > 0.0;
+    vec3 scene = ray_at(vec2(px) + 0.5, dz);
+    float far = surface ? length(scene) : 1e6;
+    vec3 rd = normalize(surface ? scene : ray_at(vec2(px) + 0.5, 0.5));
+    float pa = length(normalize(ray_at(vec2(px) + vec2(1.5, 0.5), 0.5)) - normalize(ray_at(vec2(px) + 0.5, 0.5)));
+    float t_sec = Info.x;
+
+    vec4 c4 = imageLoad(Canvas, px);
+    vec3 col = to_linear(c4.rgb);
+    vec3 lit = vec3(0.0);
+    // how much the picture is darkened round the lines (their rims)
+    float rim = 0.0;
+    // glass over the picture (a cone's, the nearest), blended under the light
+    float glass_t = 1e9;
+    vec3 glass = vec3(0.0);
+    float glass_a = 0.0;
+    // matter over the picture (solid sprites): its colour laid over, how much it covers
+    vec4 over = vec4(0.0);
+    // the weather's particles laid over the picture, in their order (premultiplied)
+    vec4 part = vec4(0.0);
+    // the picture smeared (the motion blur): col is it already
+    bool blurred = false;
+    // the picture bent (rings' shocks): where to take it from instead
+    vec2 warp = vec2(0.0);
+    // a grid's: how much of the world this pixel covers (once)
+    bool have_step = false;
+    vec2 step_xz = vec2(0.0);
+
+    for (uint j = 0u; j < count; j++) {
+        Shape s = cache[j];
+        int kind = int(s.v[3].x + 0.5);
+        int flags = int(s.v[3].y + 0.5);
+        float glow_k = s.v[3].z;
+        bool xray = (flags & XRAY) != 0;
+        vec3 kc = s.colour.rgb;
+        float k = s.colour.w;
+
+        if (kind == SEG || kind == DOT) {
+            vec3 a = s.v[0].xyz;
+            vec3 b = kind == SEG ? s.v[1].xyz : a;
+            float t, u;
+            float d = apart(rd, a, b, t, u);
+            float r = s.v[0].w * (kind == SEG ? mix(1.0, s.v[1].w, u) : 1.0);
+            float pf = max(t, 0.05) * pa;
+            if ((flags & THIN) != 0) {
+                r = min(r, pf * 1.6 + r * 0.25);
+            }
+            float rc = max(r, pf * 0.75);
+            float reach = rc * (2.5 + 5.0 * glow_k) + pf * 2.0;
+            if (d > reach) {
+                continue;
+            }
+            bool seg = kind == SEG;
+            float len = length(b - a);
+            float sn = seen_at(t, far, xray);
+            if (seg && (flags & DASH) != 0) {
+                // hidden, dashed
+                float vis = 1.0 - smoothstep(far - 0.03, far + 0.14, t);
+                sn = max(vis, (1.0 - vis) * 0.55 * step(0.5, fract(u * len / max(s.v[2].w, 0.02))));
+            }
+            if (sn <= 0.0) {
+                continue;
+            }
+            vec3 cc = kc;
+            float run = 1.0;
+            if (seg && (flags & (RUN | SHIMMER | GRADIENT)) != 0) {
+                vec3 p = mix(a, b, u);
+                float th = atan(p.z - s.v[2].y, p.x - s.v[2].x);
+                if ((flags & GRADIENT) != 0) {
+                    cc = mix(kc, unpacked(s.v[3].w), u);
+                } else if ((flags & SHIMMER) != 0) {
+                    cc = mix(kc, unpacked(s.v[3].w), 0.5 + 0.5 * sin(th * 2.0 - t_sec * 2.0));
+                }
+                if ((flags & RUN) != 0) {
+                    // a light going round the middle
+                    float da = abs(mod(th - t_sec * s.v[2].z * 2.0 + PI, 2.0 * PI) - PI);
+                    run = 0.55 + 2.2 * exp(-da * da * 5.0);
+                }
+            }
+            float core = (r / rc) * (1.0 - smoothstep(rc - pf * 0.5, rc + pf * 0.5, d));
+            float g = d / (rc * (1.0 + 2.2 * glow_k) + pf * 1.5);
+            float glow = glow_k * (0.2 * exp(-g * g * 1.6) + 0.04 * exp(-d / (rc * 5.0 + pf * 3.0)));
+            // its ends fading out
+            float ends = (flags & FADE_ENDS) != 0 && seg ? smoothstep(0.0, 0.3, min(u, 1.0 - u)) : 1.0;
+            lit += k * sn * ends * run * (mix(cc, vec3(1.0), 0.5) * core + cc * glow);
+            rim = max(rim, min(k, 1.0) * sn * ends * line_rim(d, r, pf));
+        } else if (kind == RING) {
+            if (!surface) {
+                continue;
+            }
+            vec3 q = scene - s.v[0].xyz;
+            float band = s.v[1].y;
+            float fade_v = 1.0 - smoothstep(band * 0.55, band, abs(q.y));
+            if (fade_v <= 0.0) {
+                continue;
+            }
+            float radius = s.v[0].w;
+            float w = s.v[1].x;
+            float hd = length(q.xz);
+            float ang = atan(q.z, q.x);
+            if ((flags & CLIPPED) != 0) {
+                // stopped where a wall or a drop met it (the wall's face it reaches lit)
+                float reach = sector_reach(s.v[2], ang);
+                fade_v *= 1.0 - smoothstep(reach, reach + 0.2, hd);
+                if (fade_v <= 0.0) {
+                    continue;
+                }
+            }
+            // v[1].w: its style (0 one ring, 1 ripples: rings following it in, fainter); v[3].w its seed (the edge's
+            // roughness a wave's, its own)
+            int style = int(s.v[1].w + 0.5);
+            float seed = s.v[3].w;
+            float rr = radius * (1.0 + (style == 1 ? 0.0 : 0.016 * (sin(ang * 7.0 + seed) + 0.6 * sin(ang * 13.0 - seed * 1.7))));
+            float pf = far * pa;
+            float core = 0.0;
+            float glow = 0.0;
+            float spacing = w * 7.0 + 0.22;
+            for (int i = 0; i < (style == 1 ? 4 : 1); i++) {
+                float ri = rr - float(i) * spacing;
+                if (ri <= 0.0) {
+                    break;
+                }
+                float ki = pow(0.55, float(i));
+                float rdist = abs(hd - ri);
+                core += ki * line_core(rdist, w, pf);
+                float g = rdist / (w * (1.5 + 3.0 * glow_k) + pf * 1.5);
+                glow += ki * glow_k * 0.35 * exp(-g * g * 1.4);
+                if (i == 0) {
+                    rim = max(rim, min(k, 1.0) * fade_v * line_rim(rdist, w, pf));
+                }
+            }
+            // inside: a light rising toward the rim
+            float fill = hd < rr ? s.v[1].z * pow(hd / max(rr, 1e-3), 3.0) : 0.0;
+            lit += k * fade_v * (mix(kc, vec3(1.0), 0.45) * core + kc * (glow + fill));
+            if ((flags & BEND) != 0) {
+                // the picture pushed out round the edge, as through a shock in the air
+                vec4 cc = ViewProj * vec4(s.v[0].xyz, 1.0);
+                if (cc.w > 0.05) {
+                    vec2 d2 = uv - (cc.xy / cc.w * 0.5 + 0.5);
+                    float l2 = length(d2);
+                    float x = (hd - rr) / (w * 3.0 + 0.15);
+                    warp += (l2 > 1e-5 ? d2 / l2 : vec2(0.0)) * 0.006 * min(k, 1.5) * fade_v * x * exp(-x * x);
+                }
+            }
+        } else if (kind == GRID) {
+            if (!surface) {
+                continue;
+            }
+            vec3 c = s.v[0].xyz;
+            float reach = s.v[0].w;
+            float rh = length(scene.xz - c.xz);
+            float fade = (1.0 - smoothstep(reach * 0.55, reach, rh)) * (1.0 - smoothstep(reach * 0.35, reach * 0.5, abs(scene.y - c.y)));
+            if (fade <= 0.0) {
+                continue;
+            }
+            float period = max(s.v[1].x, 1.0);
+            int pi = int(period + 0.5);
+            // the surface's place in the world, near its own origin (a multiple of the period: what is left is small)
+            ivec3 base = ((CamBlock.xyz % pi) + pi) % pi;
+            vec3 w = vec3(base) + CamFrac.xyz + scene;
+            vec3 cw = vec3(base) + CamFrac.xyz + c;
+            vec2 cell = floor(w.xz / period);
+            vec2 here = floor(cw.xz / period);
+            vec2 fr = w.xz / period - cell;
+            vec2 dl = min(fr, 1.0 - fr) * period;
+            float pf = far * pa;
+            // how much of the world a pixel covers along x and z here (the surface seen at a grazing look covers more:
+            // the lines there wider and fainter, not broken), from the next pixels' places
+            if (!have_step) {
+                have_step = true;
+                vec2 u1 = (vec2(px) + vec2(1.5, 0.5)) / Info.zw;
+                vec2 u2 = (vec2(px) + vec2(0.5, 1.5)) / Info.zw;
+                vec3 s1 = ray_at(vec2(px) + vec2(1.5, 0.5), textureLod(Depth, u1, 0.0).r) - scene;
+                vec3 s2 = ray_at(vec2(px) + vec2(0.5, 1.5), textureLod(Depth, u2, 0.0).r) - scene;
+                step_xz = abs(s1.xz) + abs(s2.xz);
+            }
+            vec2 fp = clamp(step_xz, vec2(pf * 0.5), vec2(pf * 6.0));
+            // close by no wider on the frame than a few pixels
+            vec2 lw2 = min(vec2(s.v[1].y), fp * 2.0);
+            float lw = s.v[1].y;
+            // a face along the line itself (its x or z the same across it) only faintly: the border's plane is on it
+            vec2 along = vec2(smoothstep(pf * 0.03, pf * 0.2, step_xz.x), smoothstep(pf * 0.03, pf * 0.2, step_xz.y));
+            float lx = line_core(dl.x, lw2.x, fp.x) * mix(0.18, 1.0, along.x);
+            float lz = line_core(dl.y, lw2.y, fp.y) * mix(0.18, 1.0, along.y);
+            float line = max(lx, lz);
+            rim = max(rim, min(k, 1.0) * fade * max(line_rim(dl.x, lw2.x, fp.x) * along.x, line_rim(dl.y, lw2.y, fp.y) * along.y));
+            if (line <= 0.002) {
+                continue;
+            }
+            // the middle's cell's own borders in the second colour
+            bool mine_x = lx >= lz && (cell.y == here.y) && (abs(round(w.x / period) - here.x) < 0.5 || abs(round(w.x / period) - here.x - 1.0) < 0.5);
+            bool mine_z = lz > lx && (cell.x == here.x) && (abs(round(w.z / period) - here.y) < 0.5 || abs(round(w.z / period) - here.y - 1.0) < 0.5);
+            vec3 lc = (s.v[1].z > 0.5 && (mine_x || mine_z)) ? s.v[2].rgb : kc;
+            float lk = (s.v[1].z > 0.5 && (mine_x || mine_z)) ? 1.6 : 1.0;
+            lit += k * fade * lk * line * mix(lc, vec3(1.0), 0.25) * (0.85 + 0.15 * sin(t_sec * 2.0 + rh * 0.4));
+        } else if (kind == WALL) {
+            vec3 o = s.v[0].xyz;
+            vec3 uu = s.v[1].xyz;
+            vec3 vv = s.v[2].xyz;
+            vec3 nrm = normalize(cross(uu, vv));
+            float dn = dot(rd, nrm);
+            if (abs(dn) < 1e-5) {
+                continue;
+            }
+            float t = dot(o, nrm) / dn;
+            if (t <= 0.0) {
+                continue;
+            }
+            float sn = seen_at(t, far, xray);
+            if (sn <= 0.0) {
+                continue;
+            }
+            vec3 h = rd * t - o;
+            float su = dot(h, uu) / dot(uu, uu);
+            float sv = dot(h, vv) / dot(vv, vv);
+            if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) {
+                continue;
+            }
+            // faded toward the ends of its height (v), and far off
+            vec3 at = rd * t;
+            float fade = (flags & NO_FADE) != 0 ? 1.0 : smoothstep(0.0, 0.3, sv) * (1.0 - smoothstep(0.7, 1.0, sv)) * (1.0 - smoothstep(48.0, 96.0, length(at.xz)));
+            if (fade <= 0.0) {
+                continue;
+            }
+            float cellb = max(s.v[0].w, 0.0625);
+            float lw = s.v[1].w;
+            float lu = su * length(uu) / cellb;
+            float lv = sv * length(vv) / cellb;
+            vec2 f2 = vec2(fract(lu), fract(lv));
+            vec2 d2 = min(f2, 1.0 - f2) * cellb;
+            float pf = t * pa;
+            lw = min(lw, pf * 2.2);
+            float minor = max(line_core(d2.x, lw * 0.7, pf), line_core(d2.y, lw * 0.7, pf)) * 0.6;
+            float major_n = max(s.v[3].w, 1.0);
+            vec2 fm = vec2(fract(lu / major_n), fract(lv / major_n));
+            vec2 dm = min(fm, 1.0 - fm) * cellb * major_n;
+            float major = max(line_core(dm.x, lw * 1.2, pf), line_core(dm.y, lw * 1.2, pf));
+            rim = max(rim, min(k, 1.0) * sn * fade * (lw > 0.0 ? max(line_rim(dm.x, lw * 1.2, pf), line_rim(dm.y, lw * 1.2, pf)) : 0.0));
+            float fres = pow(1.0 - abs(dn), 3.0);
+            float sheet = s.v[2].w * (0.35 + 0.65 * fres) * (0.85 + 0.15 * sin(t_sec * 1.7 + at.y * 0.35));
+            lit += k * sn * fade * (kc * (sheet + minor) + mix(kc, vec3(1.0), 0.4) * major);
+        } else if (kind == CONE) {
+            vec3 a = s.v[0].xyz;
+            float hgt = s.v[0].w;
+            vec3 ax = normalize(s.v[1].xyz);
+            float rad = s.v[1].w;
+            float kk = rad / max(hgt, 1e-4);
+            // the ray against the infinite cone round ax from a, then kept within its height
+            float cs2 = 1.0 / (1.0 + kk * kk);
+            vec3 co = -a;
+            float dv = dot(rd, ax);
+            float cv = dot(co, ax);
+            float qa = dv * dv - cs2;
+            float qb = 2.0 * (dv * cv - dot(rd, co) * cs2);
+            float qc = cv * cv - dot(co, co) * cs2;
+            float disc = qb * qb - 4.0 * qa * qc;
+            if (disc < 0.0) {
+                continue;
+            }
+            float sq = sqrt(disc);
+            float t0 = (-qb - sq) / (2.0 * qa);
+            float t1 = (-qb + sq) / (2.0 * qa);
+            float tn = 1e9;
+            for (int r = 0; r < 2; r++) {
+                float tt = r == 0 ? min(t0, t1) : max(t0, t1);
+                float y = dot(rd * tt - a, ax);
+                if (tt > 0.0 && y >= 0.0 && y <= hgt) {
+                    tn = tt;
+                    break;
+                }
+            }
+            if (tn >= 1e8 || tn > far + 0.02 || tn > glass_t) {
+                continue;
+            }
+            vec3 p = rd * tn - a;
+            float y = dot(p, ax);
+            vec3 radial = p - ax * y;
+            // round its axis: where (its turn, v[3].w, added)
+            vec3 e1 = normalize(cross(ax, abs(ax.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+            vec3 e2 = cross(ax, e1);
+            float ang = atan(dot(radial, e2), dot(radial, e1));
+            float turn = s.v[3].w;
+            vec3 rdir = radial;
+            float facets = s.v[2].w;
+            if (facets >= 3.0) {
+                // cut into flat faces: the normal of the face it is on
+                float step_a = 6.2831853 / facets;
+                float fa = (floor((ang + turn) / step_a) + 0.5) * step_a - turn;
+                rdir = (e1 * cos(fa) + e2 * sin(fa)) * length(radial);
+            }
+            vec3 nrm = normalize(rdir - ax * (length(rdir) * kk));
+            if (dot(nrm, rd) > 0.0) {
+                nrm = -nrm;
+            }
+            float cosv = abs(dot(nrm, rd));
+            float fres = pow(1.0 - cosv, 3.0);
+            // what is behind it bent a touch along its slope
+            vec4 cn = ViewProj * vec4(rd * tn + nrm * 0.2, 1.0);
+            vec4 ca = ViewProj * vec4(rd * tn, 1.0);
+            vec2 dir = cn.w > 0.05 && ca.w > 0.05 ? (cn.xy / cn.w - ca.xy / ca.w) : vec2(0.0);
+            float l = length(dir);
+            dir = l > 1e-5 ? dir / l : vec2(0.0);
+            vec3 behind = to_linear(textureLod(Scene, uv + dir * 0.008, 0.0).rgb);
+            float opacity = s.v[2].x;
+            float shine = s.v[2].y;
+            vec3 L = normalize(vec3(0.3, 0.9, 0.2));
+            float spec = pow(max(dot(reflect(rd, nrm), L), 0.0), 50.0);
+            // rings round it, from its tip down
+            float rings = s.v[2].z > 0.0 ? 0.5 + 0.5 * cos(y / hgt * 6.2831 * s.v[2].z - t_sec * 1.2) : 0.0;
+            // glass tinted, or (toward 1) a solid thing lit from above
+            float solid = smoothstep(0.6, 1.0, opacity);
+            vec3 body = kc * (0.4 + 0.6 * max(dot(nrm, L), 0.0)) * (0.75 + 0.25 * rings);
+            vec3 g = mix(mix(behind, behind * kc * 1.2, opacity), body, solid) + kc * (0.15 * rings * (1.0 - solid) + 0.7 * fres) * shine + vec3(spec * 1.3 * shine);
+            if ((flags & SWEEP) != 0) {
+                // a light going round it
+                float da = abs(mod(ang - t_sec * 1.6 - turn + 3.14159265, 6.2831853) - 3.14159265);
+                g += kc * shine * 0.9 * exp(-da * da * 3.0);
+            }
+            if ((flags & INNER) != 0) {
+                // lit from inside: brightest where seen straight through
+                g += kc * glow_k * (0.35 + 0.45 * (1.0 - fres)) * (0.92 + 0.08 * sin(t_sec * 9.0 + turn * 3.0));
+            }
+            glass_t = tn;
+            glass = g;
+            glass_a = clamp(0.35 + 0.65 * opacity + 0.3 * fres, 0.0, 1.0) * k;
+            // its rim: a line of light round its base
+            float rim_d = abs(length(radial) - rad) + abs(y - hgt);
+            float pf = tn * pa;
+            lit += k * kc * glow_k * 0.6 * exp(-pow(rim_d / (0.02 + pf * 2.0), 2.0)) * (y > hgt * 0.9 ? 1.0 : 0.0);
+        } else if (kind == BOX) {
+            vec3 lo3 = s.v[0].xyz;
+            vec3 hi3 = s.v[1].xyz;
+            vec3 d = vec3(abs(rd.x) < 1e-7 ? 1e-7 : rd.x, abs(rd.y) < 1e-7 ? 1e-7 : rd.y, abs(rd.z) < 1e-7 ? 1e-7 : rd.z);
+            vec3 ta = lo3 / d;
+            vec3 tb = hi3 / d;
+            vec3 tmin = min(ta, tb);
+            vec3 tmax = max(ta, tb);
+            float tn = max(max(tmin.x, tmin.y), tmin.z);
+            float tf = min(min(tmax.x, tmax.y), tmax.z);
+            if (tn > tf || tn <= 0.0) {
+                continue;
+            }
+            float sn = seen_at(tn, far, xray);
+            if (sn <= 0.0) {
+                continue;
+            }
+            vec3 m = vec3(tmin.x >= tn ? 1.0 : 0.0, tmin.y >= tn && tmin.x < tn ? 1.0 : 0.0, tmin.z >= tn && tmin.x < tn && tmin.y < tn ? 1.0 : 0.0);
+            vec3 nrm = -sign(d) * m;
+            float fres = pow(1.0 - abs(dot(nrm, rd)), 3.0);
+            vec3 add = kc * s.v[0].w * (0.4 + 0.6 * fres);
+            vec3 sz = max(hi3 - lo3, vec3(1e-4));
+            vec3 q = (rd * tn - lo3) / sz;
+            float level = s.v[2].x;
+            if (level > 0.0) {
+                // a fill rising: up the sides, then over the top from its edges in (v[1].w its light, v[2].y its
+                // edge's)
+                float h = m.y > 0.5 ? (nrm.y > 0.0 ? 0.75 + 0.25 * (1.0 - 2.0 * max(abs(q.x - 0.5), abs(q.z - 0.5))) : 0.0) : 0.75 * q.y;
+                float filled = 1.0 - smoothstep(level - 0.012, level + 0.012, h);
+                float edge = (h - level) / 0.03;
+                add += kc * (s.v[1].w * filled + s.v[2].y * exp(-edge * edge));
+            }
+            float cracks = s.v[2].z;
+            if (cracks > 0.0) {
+                // cracks of light over the face: its cells' borders, each lit as the cracking passes it
+                float per = max(s.v[2].w, 1.0);
+                vec2 fc = (m.x > 0.5 ? vec2(q.z * sz.z, q.y * sz.y) : m.y > 0.5 ? vec2(q.x * sz.x, q.z * sz.z) : vec2(q.x * sz.x, q.y * sz.y)) * per;
+                fc += dot(m, vec3(17.0, 31.0, 53.0)) + (dot(nrm, vec3(1.0)) > 0.0 ? 7.0 : 0.0);
+                vec2 cell = floor(fc);
+                vec2 f = fract(fc);
+                float d1 = 8.0;
+                float d2 = 8.0;
+                float id = 0.0;
+                for (int y = -1; y <= 1; y++) {
+                    for (int x = -1; x <= 1; x++) {
+                        vec2 gc = vec2(x, y);
+                        vec2 rr = gc + hash22(cell + gc) - f;
+                        float dd = dot(rr, rr);
+                        if (dd < d1) {
+                            d2 = d1;
+                            d1 = dd;
+                            id = hash12(cell + gc);
+                        } else if (dd < d2) {
+                            d2 = dd;
+                        }
+                    }
+                }
+                float apartc = sqrt(d2) - sqrt(d1);
+                float pfc = tn * pa * per;
+                float line = 1.0 - smoothstep(0.015 + pfc * 0.5, 0.03 + pfc * 1.5, apartc);
+                add += mix(kc, vec3(1.0), 0.6) * line * smoothstep(id, id + 0.1, cracks);
+            }
+            lit += k * sn * add;
+        } else if (kind == RIBBON) {
+            // v[0] its start and its half-width there, v[1] its end and its half-width there, v[2] the way across (a
+            // unit) and how far along the whole ribbon its start is, v[3].w how far its end is (blocks)
+            vec3 p0 = s.v[0].xyz;
+            vec3 ax = s.v[1].xyz - p0;
+            vec3 dv = s.v[2].xyz;
+            vec3 nrm = cross(ax, dv);
+            float nl = length(nrm);
+            if (nl < 1e-7) {
+                continue;
+            }
+            nrm /= nl;
+            float dn = dot(rd, nrm);
+            if (abs(dn) < 1e-5) {
+                continue;
+            }
+            float t = dot(p0, nrm) / dn;
+            if (t <= 0.0) {
+                continue;
+            }
+            float sn = seen_at(t, far, xray);
+            if (sn <= 0.0) {
+                continue;
+            }
+            vec3 h = rd * t - p0;
+            float a11 = dot(ax, ax);
+            float a12 = dot(ax, dv);
+            float b1 = dot(h, ax);
+            float b2 = dot(h, dv);
+            float det = a11 - a12 * a12;
+            if (det < 1e-9) {
+                continue;
+            }
+            float u = (b1 - a12 * b2) / det;
+            if (u < 0.0 || u > 1.0) {
+                continue;
+            }
+            float hw = max(mix(s.v[0].w, s.v[1].w, u), 1e-4);
+            float pf = t * pa;
+            float y = ((a11 * b2 - a12 * b1) / det) / hw;
+            float pr = pf / hw;
+            float inside = 1.0 - smoothstep(1.0 - pr, 1.0 + pr, abs(y));
+            if (inside <= 0.0) {
+                continue;
+            }
+            float along = mix(s.v[2].w, s.v[3].w, u);
+            // the sheet: faint in its middle, brighter toward its edges; streaks flowing back along it
+            float body = 0.26 + 0.74 * pow(abs(y), 4.0);
+            float flow = glow_k > 0.0 ? 0.5 + 0.5 * sin(along * 5.0 - t_sec * 6.0 + y * 2.0) : 0.5;
+            float edge = line_core(1.0 - abs(y), 0.06, pr) * 1.4;
+            float fres = pow(1.0 - abs(dn), 2.0);
+            lit += k * sn * inside * (kc * (body * (0.7 + 0.6 * flow) * (0.55 + 0.45 * fres)) + mix(kc, vec3(1.0), 0.45) * edge);
+        } else if (kind == STAMP) {
+            // v[0] its middle and its size, v[1] the way it goes (a unit, level) and how far up and down it lies on
+            // what is there, v[2].x 1 for a left foot
+            if (!surface) {
+                continue;
+            }
+            vec3 q = scene - s.v[0].xyz;
+            float band = s.v[1].w;
+            float fade_v = 1.0 - smoothstep(band * 0.5, band, abs(q.y));
+            if (fade_v <= 0.0) {
+                continue;
+            }
+            float size = max(s.v[0].w, 1e-3);
+            vec2 fw2 = normalize(s.v[1].xz + vec2(1e-6, 0.0));
+            vec2 rt2 = vec2(-fw2.y, fw2.x) * (s.v[2].x > 0.5 ? -1.0 : 1.0);
+            vec2 lq = vec2(dot(q.xz, rt2), dot(q.xz, fw2)) / size;
+            if (dot(lq, lq) > 2.0) {
+                continue;
+            }
+            // a footprint: its sole curving in toward the other foot, its heel behind
+            vec2 sp = lq - vec2(0.05 + 0.08 * lq.y, 0.22);
+            float sole = length(sp / vec2(0.3, 0.48)) - 1.0;
+            float heel = length((lq - vec2(-0.02, -0.5)) / vec2(0.24, 0.26)) - 1.0;
+            float d = min(sole * 0.3, heel * 0.24);
+            float pf = far * pa / size;
+            float edge = 1.0 - smoothstep(0.0, 0.035 + pf * 1.5, abs(d));
+            float fill = 1.0 - smoothstep(-pf, pf, d);
+            lit += k * fade_v * (mix(kc, vec3(1.0), 0.4) * edge + kc * fill * 0.35 * (glow_k + 0.3));
+        } else if (kind == TEXT) {
+            // v[0] its top left corner and its atlas x, v[1] the way across (its whole width) and its atlas y, v[2] the way
+            // down (its whole height) and its atlas width, v[3].w its atlas height
+            if (Spare.x <= 0.0) {
+                continue;
+            }
+            vec3 o = s.v[0].xyz;
+            vec3 uu = s.v[1].xyz;
+            vec3 vv = s.v[2].xyz;
+            vec3 nrm = cross(uu, vv);
+            float nl = length(nrm);
+            if (nl < 1e-9) {
+                continue;
+            }
+            nrm /= nl;
+            float dn = dot(rd, nrm);
+            if (abs(dn) < 1e-5) {
+                continue;
+            }
+            float t = dot(o, nrm) / dn;
+            if (t <= 0.0) {
+                continue;
+            }
+            float sn = seen_at(t, far, xray);
+            if (sn <= 0.0) {
+                continue;
+            }
+            vec3 h = rd * t - o;
+            float su = dot(h, uu) / dot(uu, uu);
+            float sv = dot(h, vv) / dot(vv, vv);
+            if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) {
+                continue;
+            }
+            bool page1 = (flags & PAGE1) != 0;
+            vec2 apx = vec2(s.v[0].w + su * s.v[2].w, s.v[1].w + sv * s.v[3].w);
+            float raw = page1 ? textureLod(Letters1, apx / Spare.zw, 0.0).r : textureLod(Letters0, apx / Spare.xy, 0.0).r;
+            // the distance to the letter's edge in atlas px (inside above 0), as the menu reads it
+            float d = (raw * 255.0 - 128.0) / 127.0 * 12.0;
+            // screen px to an atlas px here
+            float kpx = (length(uu) / max(s.v[2].w, 1.0)) / max(t * pa, 1e-6);
+            float cov = clamp(0.5 + d * kpx, 0.0, 1.0);
+            float g = smoothstep(-12.0, 0.0, d);
+            lit += k * sn * (kc * cov + kc * glow_k * g * g * 0.35 * (1.0 - cov));
+            // the soft dark round the letters (a light word on a light sky still read)
+            rim = max(rim, min(k, 1.0) * sn * (1.0 - cov) * smoothstep(-7.0, -0.5, d));
+        } else if (kind == PART) {
+            if (PartsInfo.w <= 0.0) {
+                continue;
+            }
+            vec3 o = s.v[0].xyz;
+            vec3 uu = s.v[1].xyz;
+            vec3 vv = s.v[2].xyz;
+            vec3 nrm = cross(uu, vv);
+            float nl = length(nrm);
+            if (nl < 1e-12) {
+                continue;
+            }
+            nrm /= nl;
+            float dn = dot(rd, nrm);
+            if (abs(dn) < 1e-6) {
+                continue;
+            }
+            float t = dot(o, nrm) / dn;
+            if (t <= 0.02) {
+                continue;
+            }
+            vec3 h = rd * t - o;
+            float su = dot(h, uu) / dot(uu, uu);
+            float sv = dot(h, vv) / dot(vv, vv);
+            if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) {
+                continue;
+            }
+            float sn = seen_at(t, far, false);
+            if ((flags & PART_FEATHER) != 0 && surface) {
+                // softly into what it meets (Source's depth feathering, 15 units)
+                sn *= clamp((far - t) / 0.375, 0.0, 1.0);
+            }
+            if (sn <= 0.0) {
+                continue;
+            }
+            vec4 r0 = Frames[int(s.v[0].w + 0.5)];
+            vec4 r1 = Frames[int(s.v[1].w + 0.5)];
+            // the level: the frame's texels across a pixel here
+            float px_across = length(uu) / max(t * pa, 1e-6);
+            float tex_across = (r0.z - r0.x) * PartsInfo.x;
+            float lod = clamp(log2(max(tex_across / max(px_across, 1e-3), 1.0)), 0.0, PartsInfo.z);
+            vec2 at = vec2(su, sv);
+            vec4 c = textureLod(Parts, mix(r0.xy, r0.zw, at), lod);
+            if (s.v[2].w > 0.0) {
+                c = mix(c, textureLod(Parts, mix(r1.xy, r1.zw, at), lod), s.v[2].w);
+            }
+            vec3 rgb = kc * to_linear(c.rgb);
+            if (Recolour.w > 0.5) {
+                // the colour asked for, as bright as its own was
+                rgb = Recolour.rgb * max(rgb.r, max(rgb.g, rgb.b));
+            }
+            if ((flags & PART_SATURATE) != 0) {
+                rgb = min(rgb, vec3(1.0));
+            }
+            float a = c.a;
+            if ((flags & PART_REMAP) != 0) {
+                a = smoothstep(s.v[3].z, s.v[3].w, a);
+            }
+            a *= k;
+            if ((flags & PART_TRAIL) != 0) {
+                rgb *= mix(vec3(1.0), unpacked(s.v[3].z), sv);
+                a *= mix(1.0, s.v[3].w, sv);
+            }
+            a = clamp(a * sn, 0.0, 1.0);
+            if ((flags & PART_ADD) != 0) {
+                lit += rgb * a;
+            } else {
+                part = vec4(rgb * a + part.rgb * (1.0 - a), a + part.a * (1.0 - a));
+            }
+        } else if (kind == BLUR) {
+            // v[0].x how long the shutter is (of a 60th of a second), y how many samples, z 1: only the turn (the
+            // camera's move left out), w the longest smear (of the frame's width)
+            if (Motion.w <= 0.0) {
+                continue;
+            }
+            vec3 pw = surface ? scene : rd * 2000.0;
+            vec3 was = pw + (s.v[0].z > 0.5 ? vec3(0.0) : Motion.xyz);
+            vec4 pc = PrevViewProj * vec4(was, 1.0);
+            if (pc.w <= 0.05) {
+                continue;
+            }
+            vec2 puv = pc.xy / pc.w * 0.5 + 0.5;
+            vec2 vel = (uv - puv) * s.v[0].x * Motion.w * k;
+            float vl = length(vel * Info.zw);
+            float most = s.v[0].w * Info.z;
+            if (vl > most) {
+                vel *= most / vl;
+                vl = most;
+            }
+            if (vl < 0.75) {
+                continue;
+            }
+            int n = int(clamp(s.v[0].y, 4.0, 32.0));
+            vec3 acc = vec3(0.0);
+            // along the smear, centred on the pixel, a little jittered (no bands)
+            float jit = hash12(vec2(px) + fract(t_sec) * 37.0);
+            for (int i = 0; i < n; i++) {
+                float f = (float(i) + jit) / float(n) - 0.5;
+                acc += to_linear(textureLod(Scene, uv + vel * f, 0.0).rgb);
+            }
+            col = acc / float(n);
+            blurred = true;
+        } else if (kind == FOG) {
+            // v[0].xy its bottom and top (from the camera), z how thick, v[1].xz the wind's drift so far (blocks), y the
+            // wisps' size
+            float y0 = s.v[0].x;
+            float y1 = s.v[0].y;
+            float t_end = surface ? far : 400.0;
+            float ta;
+            float tb;
+            if (abs(rd.y) < 1e-5) {
+                bool in_slab = y0 <= 0.0 && y1 >= 0.0;
+                ta = 0.0;
+                tb = in_slab ? t_end : 0.0;
+            } else {
+                float t0 = y0 / rd.y;
+                float t1 = y1 / rd.y;
+                ta = max(min(t0, t1), 0.0);
+                tb = min(max(t0, t1), t_end);
+            }
+            float len = min(tb - ta, 40.0);
+            if (len <= 0.0) {
+                continue;
+            }
+            // thicker low in it; in wisps (at the middle of the way through it, the wind's drift taken off)
+            float mid = (ta + tb) * 0.5;
+            float hy = clamp((rd.y * mid - y0) / max(y1 - y0, 0.1), 0.0, 1.0);
+            vec2 wxz = vec2(CamBlock.xz) + CamFrac.xz + rd.xz * mid - s.v[1].xz;
+            float scale_w = max(s.v[1].y, 0.5);
+            float wisp = noise2(wxz / scale_w) * 0.65 + noise2(wxz / (scale_w * 0.37) + 17.0) * 0.35;
+            float dens = s.v[0].z * (1.15 - hy) * (0.35 + 1.3 * wisp);
+            float a = (1.0 - exp(-len * dens)) * k;
+            over = vec4(over.rgb * (1.0 - a) + kc * a, over.a + a * (1.0 - over.a));
+        } else if (kind == SPRITE) {
+            vec3 c = s.v[0].xyz;
+            float t = dot(c, rd);
+            if (t <= 0.05) {
+                continue;
+            }
+            float sn = seen_at(t, far, xray);
+            if (sn <= 0.0) {
+                continue;
+            }
+            vec3 o = rd * t - c;
+            vec2 q = vec2(dot(o, Right.xyz), dot(o, Up.xyz));
+            float size = max(s.v[0].w, 1e-4);
+            float rot = s.v[1].y;
+            vec2 rq = vec2(cos(rot) * q.x - sin(rot) * q.y, sin(rot) * q.x + cos(rot) * q.y) / size;
+            // narrowed across (v[1].z, 0: not): a leaf turned edge on, a flake lying flat seen from the side, a streak
+            if (s.v[1].z > 0.0) {
+                rq.x /= max(s.v[1].z, 0.06);
+            }
+            int shp = int(s.v[1].x + 0.5);
+            float pf = t * pa / size;
+            float a = 0.0;
+            if (shp == 1) {
+                // a leaf: pointed at both ends, a vein down it
+                float e = length(vec2(rq.x * 2.2, rq.y)) + abs(rq.y) * 0.25;
+                a = (1.0 - smoothstep(0.85 - pf, 0.95 + pf, e)) * (0.82 + 0.18 * smoothstep(0.02, 0.06 + pf, abs(rq.x)));
+            } else if (shp == 2) {
+                // a flake: six arms
+                float ang = atan(rq.y, rq.x);
+                float arms = pow(abs(cos(ang * 3.0)), 10.0);
+                float r = length(rq);
+                a = exp(-r * 5.0) * 0.6 + arms * (1.0 - smoothstep(0.6, 1.0 + pf, r)) * 0.8;
+            } else if (shp == 3) {
+                // an ember: a hot core, its glow
+                float r2 = dot(rq, rq);
+                a = exp(-r2 * 9.0) * 1.4 + exp(-r2 * 1.6) * 0.35;
+            } else if (shp == 4) {
+                // a puff of dust: soft, thinning to its edge
+                float r2 = dot(rq, rq);
+                a = exp(-r2 * 2.6) * 0.75;
+            } else if ((flags & SOLID) != 0) {
+                // a grain: a little round thing, its edge sharp
+                a = 1.0 - smoothstep(0.82 - pf, 0.9 + pf, length(rq));
+            } else {
+                float r2 = dot(rq, rq);
+                a = exp(-r2 * 3.5);
+            }
+            // smaller than a pixel: its light kept, spread over the pixel
+            float small = clamp(1.0 / max(pf, 1.0), 0.0, 1.0);
+            if ((flags & SOLID) != 0) {
+                // lit from above as a little round thing is
+                float shade = shp == 4 ? 1.0 + 0.15 * clamp(rq.y, -1.0, 1.0) : 0.7 + 0.6 * clamp(rq.y * 0.8 + 0.4, 0.0, 1.0);
+                float cov = clamp(k * sn * a * mix(small, 1.0, small), 0.0, 1.0);
+                over = vec4(over.rgb * (1.0 - cov) + kc * shade * cov, over.a + cov * (1.0 - over.a));
+            } else {
+                lit += k * sn * kc * a * mix(small, 1.0, small);
+            }
+        }
+    }
+
+    if (dot(warp, warp) > 1e-12) {
+        col = to_linear(textureLod(Scene, uv + warp, 0.0).rgb);
+    }
+    if (glass_a > 0.0) {
+        col = mix(col, glass, glass_a);
+    }
+    // matter lit as what is behind it is (dust at night as dark as the night)
+    float behind_light = clamp(dot(col, vec3(0.2126, 0.7152, 0.0722)) * 2.6 + 0.05, 0.08, 1.1);
+    col = col * (1.0 - over.a) + over.rgb * behind_light;
+    col = col * (1.0 - part.a) + part.rgb;
+    if (!blurred && glass_a <= 0.0 && dot(lit, lit) <= 1e-8 && rim <= 1e-4 && dot(warp, warp) <= 1e-12 && over.a <= 1e-4 && part.a <= 1e-4) {
+        return;
+    }
+    col *= 1.0 - 0.38 * rim;
+    col += lit;
+    imageStore(Canvas, px, vec4(to_srgb(min(col, vec3(1.0))), c4.a));
+}

@@ -1,0 +1,39 @@
+// The menu's text: each glyph from its distance field (tools/text_atlas.py), any size, sharp, with a soft glow.
+// One group a glyph; coverage (with the text's brightness) and glow go into two sums by atomic max (glyph boxes
+// overlap at their margins), which comp.comp puts over the picture and clears.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 1) uniform sampler2D Atlas;
+layout(set = 0, binding = 2, r32ui) uniform uimage2D Cov;
+layout(set = 0, binding = 3, r32ui) uniform uimage2D Glow;
+layout(set = 0, binding = 4, std430) readonly buffer Glyphs {
+    // per glyph: its box (x0 y0 x1 y1, picture px, y down), its field in the atlas (x0 y0 x1 y1 px),
+    // brightness, strength, glow, -, the clip (x0 y0 x1 y1, picture px)
+    vec4 G[];
+};
+layout(push_constant) uniform Step {
+    ivec4 Info;    // -, picture width, height, -
+    vec4 Field;    // spread (atlas px), atlas width, height, -
+};
+void main(){
+  uint i = gl_WorkGroupID.x;
+  vec4 q = G[i * 4u], a = G[i * 4u + 1u], s = G[i * 4u + 2u], c = G[i * 4u + 3u];
+  float k = (q.w - q.y) / max(a.w - a.y, 1.);          // picture px per atlas px
+  ivec2 lo = ivec2(floor(max(q.xy, c.xy))), hi = ivec2(ceil(min(q.zw, c.zw)));
+  lo = max(lo, ivec2(0)); hi = min(hi, Info.yz);
+  uint bright = uint(clamp(s.x, 0., 1.) * 255. + .5);
+  for (int y = lo.y + int(gl_LocalInvocationID.y); y < hi.y; y += 16) {
+    for (int x = lo.x + int(gl_LocalInvocationID.x); x < hi.x; x += 16) {
+      vec2 p = vec2(x, y) + .5;
+      vec2 at = a.xy + (p - q.xy) / k;
+      float v = textureLod(Atlas, at / Field.yz, 0.).r;
+      float d = (v * 255. - 128.) / 127. * Field.x;     // atlas px, + inside
+      float cov = clamp(.5 + d * k, 0., 1.) * s.y;
+      if (cov > .002) imageAtomicMax(Cov, ivec2(x, y), (uint(cov * 65535.) << 8) | bright);
+      if (s.z > 0.) {
+        float g = smoothstep(-Field.x, 0., d);
+        g = g * g * s.z * s.y;
+        if (g > .002) imageAtomicMax(Glow, ivec2(x, y), uint(g * 65535.));
+      }
+    }
+  }
+}

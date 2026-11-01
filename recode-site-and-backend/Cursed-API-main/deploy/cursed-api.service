@@ -1,0 +1,48 @@
+# The accounts and the market of cursedclient.xyz (/api, behind nginx). Its own user, no rights; it writes only its
+# database and uploads (/var/lib/cursed, private) and the market's files (/var/lib/cursed-media, which nginx reads).
+[Unit]
+Description=Cursed accounts (cursedclient.xyz/api)
+After=network.target
+
+[Service]
+User=cursed
+Group=cursed
+Environment=CURSED_DB=/var/lib/cursed/cursed.db
+Environment=CURSED_LISTEN=127.0.0.1:8080
+Environment=CURSED_ORIGIN=https://cursedclient.xyz
+Environment=CURSED_MEDIA=/var/lib/cursed-media
+Environment=CURSED_DIST=/var/lib/cursed-dist
+ExecStart=/opt/cursed/cursed-api serve
+Restart=on-failure
+RestartSec=2
+StateDirectory=cursed
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/cursed-media
+UMask=0027
+MemoryHigh=900M
+MemoryMax=1500M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,130 @@
+// The window before the game (twin/mod.rs), v12: a see-through window over the desktop. A spark lights where the
+// menu's glow will be, draws a line out to the game window's edges, and the window opens along it, up and down (its
+// edges a clean thin light — nothing burns since her rule of 14.10); inside is the card
+// (the launch's picture) and the window's bar. On the way out the window closes back onto the line, the line into the
+// spark, the spark fades out. The desktop itself shows through. Out: premultiplied BGRA. From the preview's FS_DESK (v12/js/desk.js), ui px, the math y up.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D Card;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D Out;
+layout(set = 0, binding = 3, std140) uniform Twin {
+    vec4 Win;      // the game's picture in this window: x, y from the bottom, w, h (px)
+    vec4 Frame;    // the game window's frame (with its title bar): x, y from the bottom, w, h (px)
+    vec4 Spark;    // the spark (x, y from the bottom, px), -, time
+    vec4 LineA;    // the line: its length left, right of the spark (ui px), strength, its heads' strength
+    vec4 OpenA;    // the window open up, down from the spark (ui px), its edges' heat, 1 closing
+    vec4 C;        // the whole window's strength (it fades on handing over), the card shown, px per ui px, corner radius
+    vec4 D;        // this window's size, the spark, the wisp (0..1, -1 none)
+    vec4 E;        // the game window's frame colour (rgb), its title bar: 0 none, 1 Windows' (the frame's width), 2 ours (the picture's)
+    vec4 F;        // the window's shadow, its bar's strength, the card see-through (v13: premultiplied, its own alpha), -
+};
+layout(set = 0, binding = 4) uniform sampler2D Bar;   // the game window's title bar (chrome/ or titlebar.rs)
+#undef uTime
+#define uTime Spark.w
+
+float sdBox(vec2 p, vec2 b, float r){ vec2 q = abs(p) - b + r; return length(max(q, 0.)) + min(max(q.x, q.y), 0.) - r; }
+// a thread of smoke: up from a point, swaying and spreading
+float thread(vec2 p, vec2 base, float lift){
+  float h = p.y - base.y - lift;
+  if (h < 0. || h > 300.) return 0.;
+  float k = h / 300.;
+  float wob = sin(h * .042 - uTime * 1.6) * h * .07 + gn2(vec2(h * .011, uTime * .3)) * h * .5;
+  float w = .7 + h * .05;
+  float dx = p.x - base.x - wob;
+  return exp(-dx * dx / (w * w)) * smoothstep(0., 16., h) * (1. - k) * (1. - k) * 1.4 / (1. + h * .012);
+}
+
+void main(){
+  ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+  if (q.x >= int(D.x) || q.y >= int(D.y)) return;
+  float s = C.z;
+  vec2 p = vec2(float(q.x) + .5, D.y - float(q.y) - .5) / s;          // ui px, y up (the preview's units)
+  vec4 win = Win / vec4(s), frame = Frame / vec4(s);
+  vec2 sp = Spark.xy / s;
+  float x0 = frame.x, x1 = frame.x + frame.z;
+  vec2 c = frame.xy + frame.zw * .5;
+  float dR = sdBox(p - c, frame.zw * .5, C.w);
+  float inR = smoothstep(.75, -.75, dR);
+  // the window as it stands casts a soft shadow
+  float dark = (1. - inR) * exp(-max(dR, 0.) / 14.) * .45 * F.x;
+  float yT = sp.y + OpenA.x, yB = sp.y - OpenA.y;
+  float hole = 0.;
+  if (OpenA.x + OpenA.y > .05) {
+    float ax = smoothstep(-.5, .5, min(p.x - x0, x1 - p.x));
+    float ay = smoothstep(-.5, .5, min(p.y - yB, yT - p.y));
+    hole = ax * ay * inR;
+  }
+  float em = 0.;
+  float I = OpenA.z;
+  if (I > 0.) {
+    // (her rule, 14.10: nothing burns — no charred desktop, no tongues, no embers) the edges a clean thin light, a soft
+    // breath of it round them
+    float ex = smoothstep(-1.5, 1.5, min(p.x - x0, x1 - p.x));
+    for (int k = 0; k < 2; k++) {
+      float yE = k == 0 ? yT : yB;
+      float dy = p.y - yE;
+      em += ex * (exp(-dy * dy / 1.1) * 1.25 + exp(-abs(dy) / 7.) * .1 + exp(-abs(dy) / 34.) * .02) * I;
+    }
+    // the window's sides: a clean cut
+    float sideIn = smoothstep(yB - 1., yB + 1., p.y) * smoothstep(yT + 1., yT - 1., p.y);
+    float dxs = min(abs(p.x - x0), abs(p.x - x1));
+    em += (exp(-dxs * dxs / 1.4) * .55 + exp(-dxs / 6.) * .06) * sideIn * I;
+  }
+  // the line: the spark draws it out to the window's edges (and back in on the way out)
+  if (LineA.z > 0.) {
+    float dy = p.y - sp.y;
+    float a = sp.x - LineA.x, b = sp.x + LineA.y;
+    float inside = smoothstep(a - 1., a + 1.5, p.x) * smoothstep(b + 1., b - 1.5, p.x);
+    float dh = min(abs(p.x - a), abs(p.x - b));
+    float hot = exp(-dh / 30.);
+    em += inside * (exp(-dy * dy / 1.1) * (1.1 + 1.2 * hot * LineA.w) + exp(-abs(dy) / 5.) * (.14 + .18 * hot * LineA.w) + exp(-abs(dy) / 26.) * .03) * LineA.z;
+    // its heads: bright, drawn out along their way
+    for (int k = 0; k < 2; k++) {
+      vec2 h = vec2(k == 0 ? a : b, sp.y);
+      float dd = length((p - h) * vec2(.28, 1.));
+      em += (exp(-dd * dd / 2.5) * 1.8 + exp(-dd / 7.) * .25) * LineA.w * LineA.z;
+    }
+  }
+  float r = length(p - sp);
+  float tw = 1.;   // (a steady point: no flicker of a flame)
+  em += (exp(-r * r / 2.5) * 3. + exp(-r / 5.) * .9 + exp(-r / 24.) * .22 + exp(-r / 90.) * .05) * D.z * tw;
+  // (it goes out without smoke now: the point fades, that is all)
+  float wisp = 0.;
+  // put together, premultiplied: the darkened desktop, the window open with the card, smoke, light over all
+  vec3 rgb = vec3(0.);
+  float a = dark;
+  if (hole > 0.) {
+    vec2 cuv = (p - win.xy) / win.zw;
+    vec3 card;
+    float ca = 1.;
+    bool inCard = cuv.x >= 0. && cuv.x <= 1. && cuv.y >= 0. && cuv.y <= 1.;
+    if (C.y > 0. && inCard) {
+      vec4 cc = textureLod(Card, vec2(cuv.x, 1. - cuv.y), 0.);
+      card = cc.rgb;
+      ca = F.z > .5 ? cc.a : 1.;
+    } else if (F.z > .5 && inCard) {
+      // (the glass: no card yet — the desktop shows)
+      card = vec3(0.);
+      ca = 0.;
+    } else {
+      float top = frame.y + frame.w, barTop = win.y + win.w;
+      // (our own bar spans the picture's width — the frame's edge beside it is the frame's colour; Windows' the frame's)
+      vec2 buv = E.w > 1.5 ? vec2((p.x - win.x) / win.z, (top - p.y) / max(top - barTop, 1e-3)) : vec2((p.x - frame.x) / frame.z, (top - p.y) / max(top - barTop, 1e-3));
+      vec3 bar = E.w > 0. && p.y >= barTop && buv.x >= 0. && buv.x <= 1. && buv.y >= 0. && buv.y <= 1. ? textureLod(Bar, buv, 0.).rgb : E.rgb;
+      // the bar comes on a moment after the window has opened (dark till then, as the picture; the glass: not there)
+      card = F.z > .5 ? bar * F.y : mix(vec3(.012), bar, F.y);
+      ca = F.z > .5 ? F.y : 1.;
+    }
+    rgb = card * hole + rgb * (1. - hole * ca);
+    a = hole * ca + a * (1. - hole * ca);
+  }
+  float wa = clamp(wisp, 0., .8);
+  rgb = vec3(.62) * wa + rgb * (1. - wa); a = wa + a * (1. - wa);
+  // light: over the desktop it takes the place of what is under it
+  float lit = clamp(em, 0., 1.);
+  rgb = rgb + vec3(em);
+  a = max(a, lit);
+  rgb = min(rgb, vec3(a));
+  rgb += (hq(vec2(q), 3.) - .5) / 255. * a;
+  rgb *= C.x; a *= C.x;
+  imageStore(Out, q, vec4(rgb.b, rgb.g, rgb.r, a));
+}

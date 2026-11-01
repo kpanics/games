@@ -1,0 +1,11 @@
+# A whole copy of the accounts' database, one a day, the last 14 kept (in /var/backups/cursed).
+[Unit]
+Description=Cursed accounts: the daily copy of the database
+
+[Service]
+Type=oneshot
+User=cursed
+Group=cursed
+UMask=0077
+Environment=CURSED_DB=/var/lib/cursed/cursed.db
+ExecStart=/bin/sh -c 'f=/var/backups/cursed/cursed-$(date +%%F).db; rm -f "$f"; /opt/cursed/cursed-api backup "$f" && find /var/backups/cursed -name "cursed-*.db" -mtime +14 -delete'

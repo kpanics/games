@@ -1,0 +1,110 @@
+#version 450
+// Coloured light (engine/gpu.rs): a grid of 128 x 64 x 128 blocks round the camera, addressed modulo its size. Light
+// spreads from glowing blocks as the game's own does — a fifteenth less each block, stopped by solid blocks, never
+// through a wall — but in colour: the glow colour of what gives it. A second grid spreads light thrown back by surfaces
+// in the open (their colour), a few blocks only. One step of both per dispatch: in from one pair, out to the other.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0) uniform usampler2DArray CursedVoxels;
+layout(set = 0, binding = 1) uniform sampler2D CursedPalette;
+layout(set = 0, binding = 2, rgba8) uniform readonly image3D LightIn;
+layout(set = 0, binding = 3, rgba8) uniform readonly image3D BounceIn;
+layout(set = 0, binding = 4, rgba8) uniform writeonly image3D LightOut;
+layout(set = 0, binding = 5, rgba8) uniform writeonly image3D BounceOut;
+layout(std140, set = 0, binding = 6) uniform CursedEngine {
+    ivec4 CursedWindow;
+    ivec4 CursedSize;
+    vec4 CursedSun;
+    vec4 CursedSunColor;
+    vec4 CursedMoon;
+    vec4 CursedSky;
+    vec4 CursedTime;
+    vec4 CursedSpare;
+    ivec4 CursedColumns[64];
+};
+
+layout(push_constant) uniform Grid {
+    // The grid's lowest corner in the world.
+    ivec4 Origin;
+};
+
+const ivec3 SIZE = ivec3(128, 64, 128);
+const ivec3 MASK = SIZE - 1;
+
+const uint C_FULL = 1u;
+const uint C_SHINY = 11u;
+const uint C_PARTIAL = 8u;
+
+// The voxel at world `w` (air outside the voxel window).
+uint voxel(ivec3 w) {
+    ivec3 r = w - CursedWindow.xyz;
+    if (r.x < 0 || r.y < 0 || r.z < 0 || r.x >= CursedWindow.w || r.z >= CursedWindow.w || r.y >= CursedSize.y) {
+        return 0xF0u;
+    }
+    return texelFetch(CursedVoxels, ivec3(w.x & 255, w.z & 255, w.y - CursedWindow.y), 0).r;
+}
+
+bool blocks(uint v) {
+    uint c = v & 15u;
+    return c == C_FULL || c == C_PARTIAL || c == C_SHINY;
+}
+
+// The group's 4x4x4 cells and one more round them, read once: voxel, light, bounce.
+shared uint tileVoxel[216];
+shared vec3 tileLight[216];
+shared vec3 tileBounce[216];
+
+int at(ivec3 l) {
+    return l.x + l.y * 6 + l.z * 36;
+}
+
+void main() {
+    ivec3 g0 = ivec3(gl_WorkGroupID) * 4;
+    for (int i = int(gl_LocalInvocationIndex); i < 216; i += 64) {
+        ivec3 tt = (g0 + ivec3(i % 6, (i / 6) % 6, i / 36) - 1) & MASK;
+        tileVoxel[i] = voxel(Origin.xyz + ((tt - Origin.xyz) & MASK));
+        tileLight[i] = imageLoad(LightIn, tt).rgb;
+        tileBounce[i] = imageLoad(BounceIn, tt).rgb;
+    }
+    barrier();
+    ivec3 t = ivec3(gl_GlobalInvocationID);
+    ivec3 l = ivec3(gl_LocalInvocationID) + 1;
+    uint v = tileVoxel[at(l)];
+    uint material = v >> 8;
+    vec4 pal = texelFetch(CursedPalette, ivec2(int(material), 0), 0);
+    vec4 glow = texelFetch(CursedPalette, ivec2(int(material), 1), 0);
+    // Glow as the light's colour at its brightest (the strongest channel 1), times its level.
+    // The palette is linear; the game's light, which this colours, is not: the glow as it looks on screen.
+    vec3 shown = pow(glow.rgb, vec3(1.0 / 2.2));
+    vec3 seed = glow.a > 0.0 ? shown / max(max(shown.r, max(shown.g, shown.b)), 1e-3) * glow.a : vec3(0.0);
+    ivec3 dirs[6] = ivec3[](ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0), ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1));
+    if (blocks(v)) {
+        // Solid: holds only its own glow (lava, glowstone), no light passes.
+        imageStore(LightOut, t, vec4(seed, 1.0));
+        imageStore(BounceOut, t, vec4(0.0));
+        return;
+    }
+    vec3 light = seed;
+    vec3 bounce = vec3(0.0);
+    float sky = float((v >> 4) & 15u) / 15.0;
+    float sun = max(CursedSun.w, CursedMoon.w * 0.25) * (1.0 - 0.7 * CursedSky.a);
+    float solids = 0.0;
+    vec3 thrown = vec3(0.0);
+    for (int i = 0; i < 6; i++) {
+        int n = at(l + dirs[i]);
+        light = max(light, tileLight[n] - 1.0 / 15.0);
+        bounce = max(bounce, tileBounce[n] * 0.72);
+        uint nv = tileVoxel[n];
+        if (blocks(nv)) {
+            // A surface next to open sky throws its colour back.
+            solids += 1.0;
+            thrown += pow(texelFetch(CursedPalette, ivec2(int(nv >> 8), 0), 0).rgb, vec3(1.0 / 2.2));
+        }
+    }
+    if (solids > 0.0 && sky > 0.9) {
+        bounce = max(bounce, thrown / solids * sun * 0.6);
+    }
+    imageStore(LightOut, t, vec4(max(light, vec3(0.0)), 1.0));
+    imageStore(BounceOut, t, vec4(bounce, 1.0));
+}

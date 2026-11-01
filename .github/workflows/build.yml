@@ -9,6 +9,10 @@ name: Build Cursed Recode
 #   * libs\ в git не лежит (.gitignore) - без setup-libs.py компилятор не видит ни Minecraft, ни Fabric;
 #   * build.cmd сам накладывает access widener, без него приватные поля игры не компилируются;
 #   * build.cmd вызывает javac --release 25, а fabric.mod.json требует java >= 25 - JDK 21 не подойдёт.
+#
+# Джоба dist (push в main) собирает ещё и дистрибутив «на GitHub» (dist/README.md): подписанный манифест,
+# start.json и файлы билда публикуются в Release с тегом `dist`, после чего тот же лоадер проверяется
+# в headless-режиме - скачивает всё с GitHub и сверяет хеши.
 
 on:
   push:
@@ -24,9 +28,18 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Дистрибутив «на GitHub»: база для лоадера и публичная половина ключа подписи манифеста
+  # (приватная - секрет CURSED_DIST_KEY; пара см. dist/README.md)
+  DIST_BASE: https://github.com/kpanics/games/releases/download/dist
+  DIST_PUB: 553f8e75906c6f2cee9b76f2243625ece155f07b10a8a9779af58356b061db2c
+
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      issues: write
     # все run-шаги по умолчанию выполняются в папке проекта и в cmd
     defaults:
       run:
@@ -80,6 +93,9 @@ jobs:
     - name: Build Rust native
       run: cargo build --release
       working-directory: Cursed-Recode-main/native
+      env:
+        CURSED_VERIFY_API: ${{ env.DIST_BASE }}
+        CURSED_VERIFY_KEY: ${{ env.DIST_PUB }}
 
     - name: Collect artifacts
       run: |
@@ -93,3 +109,129 @@ jobs:
         name: Cursed-Recode-windows-x64
         if-no-files-found: error
         path: Cursed-Recode-main/dist/*
+
+    # Логи упавшего запуска - в Issue: их можно прочитать и снаружи (run-логи отдаются только раннеру)
+    - name: Diagnostics (logs to an issue)
+      if: failure()
+      shell: pwsh
+      run: |
+        gh run view $env:GITHUB_RUN_ID --log | Select-Object -Last 1200 | Out-File -Encoding utf8 diag.log
+        gh issue create --title "CI logs: run $($env:GITHUB_RUN_ID) (build)" --body-file diag.log
+        exit 0
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+  # Дистрибутив «на GitHub»: только push в main. Собирает билд с вшитой базой и ключом,
+  # публикует Release (тег dist) и проверяет связку headless-запуском лоадера.
+  dist:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      issues: write
+    defaults:
+      run:
+        shell: cmd
+        working-directory: Cursed-Recode-main
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-msvc
+
+    - name: Cache Rust build
+      uses: actions/cache@v4
+      with:
+        path: |
+          Cursed-Recode-main/native/target
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-dist-cargo-${{ hashFiles('Cursed-Recode-main/native/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-dist-cargo-
+
+    - name: Setup Java 25
+      uses: actions/setup-java@v5
+      with:
+        distribution: 'temurin'
+        java-version: '25'
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Fetch libraries (libs\)
+      run: python tools\setup-libs.py
+
+    - name: Build Java mod (aw + javac + jar)
+      run: call build.cmd
+
+    - name: Build Rust native (с вшитой базой GitHub и ключом)
+      run: cargo build --release
+      working-directory: Cursed-Recode-main/native
+      env:
+        CURSED_VERIFY_API: ${{ env.DIST_BASE }}
+        CURSED_VERIFY_KEY: ${{ env.DIST_PUB }}
+
+    - name: Assemble the build (dist-home)
+      run: |
+        rem --- бинаря движка в bin\, сам лоадер в loader\
+        if not exist ..\dist-home\bin mkdir ..\dist-home\bin
+        if not exist ..\dist-home\loader mkdir ..\dist-home\loader
+        copy /y native\target\release\CursedRecode.exe ..\dist-home\bin\ >nul
+        copy /y native\target\release\cursed_twin.exe ..\dist-home\bin\ >nul
+        copy /y native\target\release\cursed_recode.dll ..\dist-home\bin\ >nul
+        copy /y native\target\release\recode_loader.exe ..\dist-home\loader\ >nul
+        rem --- игра (jar с access widener) и мод
+        if not exist ..\dist-home\game mkdir ..\dist-home\game
+        copy /y libs\minecraft\minecraft-26.3.jar ..\dist-home\game\ >nul
+        copy /y build\cursed-recode-*.jar ..\dist-home\game\ >nul
+        rem --- библиотеки: fabric, mc, fabric-api
+        xcopy /e /i /y libs\fabric ..\dist-home\libraries\fabric\ >nul
+        xcopy /e /i /y libs\mc ..\dist-home\libraries\mc\ >nul
+        xcopy /e /i /y libs\fabric-api ..\dist-home\libraries\fabric-api\ >nul
+        rem --- log4j конфиг
+        copy /y tools\log4j2-dev.xml ..\dist-home\log4j2.xml >nul
+        dir /s /b ..\dist-home | find /c /v ""
+
+    - name: Pack the runtime (runtime.zip из JDK раннера)
+      run: |
+        powershell -NoProfile -Command "Compress-Archive -Path \"$env:JAVA_HOME\*\" -DestinationPath ..\dist-home\runtime.zip -Force"
+        powershell -NoProfile -Command "[math]::Round((Get-Item ..\dist-home\runtime.zip).Length / 1MB)"
+
+    - name: Make the dist (манифест + подпись + start.json + object-*)
+      run: |
+        pip install --quiet cryptography
+        python ..\dist\make_dist.py --home ..\dist-home --out ..\dist-out --key %CURSED_DIST_KEY% --build %GITHUB_RUN_NUMBER% --version 0.1.0 --notes "Сборка CI" --fetch-assets 26.3
+      env:
+        CURSED_DIST_KEY: ${{ secrets.CURSED_DIST_KEY }}
+
+    - name: Publish (gh release create, тег dist)
+      run: |
+        gh release view dist >nul 2>nul && gh release delete dist --cleanup-tag --yes
+        gh release create dist ..\dist-out\* --title "Cursed Recode" --notes "Дистрибутив «на GitHub»: start.json + файлы билда (object-sha256). Лоадер - loader/recode_loader.exe." --latest
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: The linkage test (лоадер скачивает весь билд с GitHub)
+      run: |
+        set CURSED_LOADER_HOME=%CD%\..\test-home
+        mkdir ..\test-home 2>nul
+        native\target\release\recode_loader.exe --headless --token github --sync
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Diagnostics (logs to an issue)
+      if: failure()
+      shell: pwsh
+      run: |
+        gh run view $env:GITHUB_RUN_ID --log | Select-Object -Last 1500 | Out-File -Encoding utf8 diag.log
+        gh issue create --title "CI logs: run $($env:GITHUB_RUN_ID) (dist)" --body-file diag.log
+        exit 0
+      env:
+        GH_TOKEN: ${{ github.token }}
