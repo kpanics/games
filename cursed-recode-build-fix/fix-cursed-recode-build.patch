@@ -1,0 +1,186 @@
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index ee630c7..eb7795f 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -1,52 +1,93 @@
+ name: Build Cursed Recode
+ 
++# Сборка идёт штатным путём проекта (см. Cursed-Recode-main/README.md):
++#   python tools\setup-libs.py  -> libs\ (jar игры, библиотеки Minecraft, Fabric Loader, Fabric API)
++#   build.cmd                   -> tools\aw.cmd (access widener) + javac --release 25 + jar
++#   cargo build --release       -> нативный движок (CursedRecode.exe, cursed_twin.exe, cursed_recode.dll)
++#
++# Почему именно так, а не Gradle/javac «руками»:
++#   * libs\ в git не лежит (.gitignore) - без setup-libs.py компилятор не видит ни Minecraft, ни Fabric;
++#   * build.cmd сам накладывает access widener, без него приватные поля игры не компилируются;
++#   * build.cmd вызывает javac --release 25, а fabric.mod.json требует java >= 25 - JDK 21 не подойдёт.
++
+ on:
+   push:
+     branches: [ "main" ]
+   workflow_dispatch:
+ 
++permissions:
++  contents: read
++
++concurrency:
++  group: build-${{ github.ref }}
++  cancel-in-progress: true
++
+ jobs:
+   build:
+     runs-on: windows-latest
++    # все run-шаги по умолчанию выполняются в папке проекта и в cmd
++    defaults:
++      run:
++        shell: cmd
++        working-directory: Cursed-Recode-main
+ 
+     steps:
+-    - uses: actions/checkout@v4
++    - name: Checkout
++      uses: actions/checkout@v4
+ 
+     - name: Install Rust
+       uses: dtolnay/rust-toolchain@stable
+       with:
+         targets: x86_64-pc-windows-msvc
+ 
+-    - name: Build Rust Native
+-      run: |
+-        cd native
+-        cargo build --release
+-      working-directory: ./Cursed-Recode-main
+-      shell: bash
++    - name: Cache Rust build
++      uses: actions/cache@v4
++      with:
++        path: |
++          Cursed-Recode-main/native/target
++          ~/.cargo/registry
++          ~/.cargo/git
++        key: ${{ runner.os }}-cargo-${{ hashFiles('Cursed-Recode-main/native/Cargo.lock') }}
++        restore-keys: |
++          ${{ runner.os }}-cargo-
+ 
+-    - name: Setup Java
+-      uses: actions/setup-java@v4
++    - name: Setup Java 25
++      uses: actions/setup-java@v5
+       with:
+         distribution: 'temurin'
+-        java-version: '21'
++        java-version: '25'
+ 
+-    - name: Compile Java (Manual)
++    - name: Setup Python
++      uses: actions/setup-python@v5
++      with:
++        python-version: '3.12'
++
++    - name: Toolchain versions
+       run: |
+-        # Ищем все .java файлы и компилируем их
+-        $files = Get-ChildItem -Path "Cursed-Recode-main/src" -Recurse -Filter *.java | ForEach-Object { $_.FullName }
+-        javac -cp "Cursed-Recode-main/libs/*" -d "Cursed-Recode-main/out" $files
+-      shell: pwsh
++        java -version
++        javac -version
++        python --version
++        cargo --version
++
++    - name: Fetch libraries (libs\)
++      run: python tools\setup-libs.py
+ 
+-    - name: Package JAR
++    - name: Build Java mod (aw + javac + jar)
++      run: call build.cmd
++
++    - name: Build Rust native
++      run: cargo build --release
++      working-directory: Cursed-Recode-main/native
++
++    - name: Collect artifacts
+       run: |
+-        # Упаковываем скомпилированные классы в .jar
+-        jar -cf "CursedRecode.jar" -C "Cursed-Recode-main/out" .
+-      shell: pwsh
++        if not exist dist mkdir dist
++        for %%f in (build\cursed-recode-*.jar native\target\release\*.exe native\target\release\*.dll) do copy /y "%%f" dist\ >nul
++        dir dist
+ 
+     - name: Upload Artifact
+       uses: actions/upload-artifact@v4
+       with:
+-        name: Cursed-Recode-Build
+-        path: |
+-          CursedRecode.jar
+-          Cursed-Recode-main/native/target/release/*.dll
+\ No newline at end of file
++        name: Cursed-Recode-windows-x64
++        if-no-files-found: error
++        path: Cursed-Recode-main/dist/*
+diff --git a/Cursed-Recode-main/build.gradle b/Cursed-Recode-main/build.gradle
+deleted file mode 100644
+index c60367f..0000000
+--- a/Cursed-Recode-main/build.gradle
++++ /dev/null
+@@ -1,43 +0,0 @@
+-plugins {
+-    id 'fabric-loom' version '1.7-SNAPSHOT'
+-    id 'maven-publish'
+-}
+-
+-version = '1.0.0'
+-group = 'cursed.recode'
+-
+-base {
+-    archivesName = 'CursedRecode'
+-}
+-
+-repositories {
+-    mavenCentral()
+-    maven { url 'https://maven.fabricmc.net/' }
+-}
+-
+-dependencies {
+-    minecraft "com.mojang:minecraft:1.21.4"
+-    mappings "net.fabricmc:yarn:1.21.4+build.8:v2"
+-    modImplementation "net.fabricmc:fabric-loader:0.16.9"
+-    modImplementation "net.fabricmc.fabric-api:fabric-api:0.106.0+1.21.4"
+-
+-    // Если есть папка libs с локальными библиотеками
+-    implementation fileTree(dir: 'libs', include: ['*.jar'])
+-}
+-
+-tasks.withType(JavaCompile).configureEach {
+-    it.options.release = 21
+-}
+-
+-java {
+-    withSourcesJar()
+-    sourceCompatibility = JavaVersion.VERSION_21
+-    targetCompatibility = JavaVersion.VERSION_21
+-}
+-
+-processResources {
+-    inputs.property "version", project.version
+-    filesMatching("fabric.mod.json") {
+-        expand "version": project.version
+-    }
+-}
+\ No newline at end of file
+diff --git a/Cursed-Recode-main/settings.gradle b/Cursed-Recode-main/settings.gradle
+deleted file mode 100644
+index c26db64..0000000
+--- a/Cursed-Recode-main/settings.gradle
++++ /dev/null
+@@ -1,7 +0,0 @@
+-pluginManagement {
+-    repositories {
+-        maven { url 'https://maven.fabricmc.net/' }
+-        gradlePluginPortal()
+-    }
+-}
+-rootProject.name = 'CursedRecode'
+\ No newline at end of file
