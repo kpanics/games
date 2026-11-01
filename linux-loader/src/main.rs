@@ -279,22 +279,40 @@ fn unpack_zips(home: &Path, m: &Manifest) -> Result<(), String> {
     Ok(())
 }
 
+/// Имя члена архива, приведённое к порядку: PowerShell Compress-Archive пишет пути с обратными
+/// слешами («bin\java.exe»), что на Windows — сепаратор, а на Linux — просто символ в имени файла.
+/// Нормализуем и выбрасываем всё, что суется наружу (`..`, абсолютные пути).
+fn safe_name(raw: &str) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for part in raw.replace('\\', "/").split('/') {
+        if part.is_empty() || part == "." || part.contains(':') || part.contains('\0') {
+            continue;
+        }
+        if part == ".." {
+            return None;
+        }
+        out.push(part);
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
 /// Один объект билда, раскрытый в папку. Верхнюю папку внутри (у JDK - своя `jdk-25…/`) срезаем;
-/// каждый член кладётся по enclosed_name, а не по имени, который он сам себе написал.
+/// члены берутся по индексу и кладутся по нормализованному имени, а не по тому, что архив сам написал.
 fn unpack_zip(object: &Path, into: &Path) -> Result<(), String> {
     let f = std::fs::File::open(object).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let names: Vec<PathBuf> = (0..archive.len())
+    let names: Vec<(usize, PathBuf)> = (0..archive.len())
         .filter_map(|i| {
             let e = archive.by_index(i).ok()?;
-            (!e.is_dir()).then(|| e.enclosed_name()).flatten()
+            let name = safe_name(e.name())?;
+            (!e.is_dir()).then_some((i, name))
         })
         .collect();
     let peel = {
-        let tops = names.iter().map(|n| n.components().next()).collect::<HashSet<_>>();
-        tops.len() == 1 && tops.into_iter().next().is_some_and(|t| t.is_some()) && names.iter().any(|n| n.components().count() >= 2)
+        let tops = names.iter().map(|(_, n)| n.components().next()).collect::<HashSet<_>>();
+        tops.len() == 1 && tops.into_iter().next().is_some_and(|t| t.is_some()) && names.iter().any(|(_, n)| n.components().count() >= 2)
     };
-    for name in &names {
+    for (i, name) in &names {
         let rel: PathBuf = if peel { name.components().skip(1).collect() } else { name.clone() };
         if rel.as_os_str().is_empty() {
             continue;
@@ -303,7 +321,7 @@ fn unpack_zip(object: &Path, into: &Path) -> Result<(), String> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", rel.display()))?;
         }
-        let mut e = archive.by_name(&name.to_string_lossy()).map_err(|e| e.to_string())?;
+        let mut e = archive.by_index(*i).map_err(|e| e.to_string())?;
         let mut o = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", rel.display()))?;
         std::io::copy(&mut e, &mut o).map_err(|e| format!("{}: {e}", rel.display()))?;
     }
