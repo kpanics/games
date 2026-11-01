@@ -158,8 +158,10 @@ def main():
             fetch(client["url"], dst)
         assert sha1(dst) == client["sha1"], "game jar sha1 mismatch"
     print("game jar ok")
-    if not os.path.exists(p("libs", "minecraft", f"minecraft-{MC_VERSION}.jar")):
-        shutil.copy2(dst, p("libs", "minecraft", f"minecraft-{MC_VERSION}.jar"))
+    # Папку создаём, но jar сюда не копируем: его пишет tools\aw.cmd (vanilla + access widener).
+    # Копия с сохранённым временем файла (copy2) для aw.cmd выглядела бы «новее входов» - и он
+    # молча пропускал расширение доступа, оставляя javac с приватными полями игры.
+    os.makedirs(os.path.join(ROOT, "libs", "minecraft"), exist_ok=True)
 
     # --- Minecraft libraries (windows x64 only) ---
     n = 0
