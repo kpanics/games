@@ -66,7 +66,7 @@ fn sha1_file(path: &Path) -> Result<String, String> {
 /// Скачивание — системным curl: TLS, редиректы (релизы GitHub уходят на CDN) и повторы — его забота.
 fn curl(url: &str, dst: &Path) -> Result<(), String> {
     let ok = Command::new("curl")
-        .args(["-fsSL", "--retry", "3", "--connect-timeout", "20", "-o"])
+        .args(["-fsSL", "--retry", "5", "--retry-delay", "2", "--retry-all-errors", "--connect-timeout", "20", "-o"])
         .arg(dst)
         .arg(url)
         .status()
@@ -212,26 +212,42 @@ fn fetch_one(home: &Path, job: &Job, p: &Progress) -> Result<(), String> {
     Ok(())
 }
 
-/// Восемь потоков над общей очередью; что не пришло — собирается и говорится в конце.
+/// Восемь потоков над общей очередью; что не пришло — возвращается в очередь и пробуется ещё раз
+/// после паузы (CDN Mojang порой не отвечает на часть из пяти тысяч подряд, потом отвечает —
+/// как fetch_all Windows-лоадера, только кругов три).
 fn sync_all(home: &Path, jobs: Vec<Job>, p: &Progress) -> Result<(), String> {
-    let queue = Mutex::new(jobs);
-    let failed: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    std::thread::scope(|s| {
-        for _ in 0..8 {
-            s.spawn(|| loop {
-                let Some(job) = queue.lock().unwrap().pop() else { break };
-                if let Err(e) = fetch_one(home, &job, p) {
-                    eprintln!("  {e}");
-                    failed.lock().unwrap().push(job.path);
-                }
-            });
+    let mut jobs = jobs;
+    let mut last = String::new();
+    for round in 0..3 {
+        if jobs.is_empty() {
+            return Ok(());
         }
-    });
-    let failed = failed.into_inner().unwrap();
-    if failed.is_empty() {
+        if round > 0 {
+            println!("  {} файлов ещё раз после паузы ({})", jobs.len(), last);
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        let queue = Mutex::new(std::mem::take(&mut jobs));
+        let failed: Mutex<Vec<Job>> = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| loop {
+                    let Some(job) = queue.lock().unwrap().pop() else { break };
+                    if let Err(e) = fetch_one(home, &job, p) {
+                        eprintln!("  {e}");
+                        failed.lock().unwrap().push(job);
+                    }
+                });
+            }
+        });
+        jobs = failed.into_inner().unwrap();
+        if let Some(j) = jobs.first() {
+            last = j.path.clone();
+        }
+    }
+    if jobs.is_empty() {
         Ok(())
     } else {
-        Err(format!("не пришли {} файлов (первый: {})", failed.len(), failed[0]))
+        Err(format!("не пришли {} файлов (первый: {})", jobs.len(), jobs[0].path))
     }
 }
 
