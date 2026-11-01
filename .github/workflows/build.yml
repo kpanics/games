@@ -122,11 +122,13 @@ jobs:
     steps:
     - name: Logs to an issue
       run: |
-        gh run view "$RUN_ID" --log > diag.log || true
-        tail -c 60000 diag.log > diag.md; [ -s diag.md ] || cp diag.log diag.md
-        if [ -s diag.md ]; then
-          gh issue create --title "CI logs: run $RUN_ID (build)" --body-file diag.md
-        fi
+        set -x
+        gh run view "$RUN_ID" --log > diag.log 2> view.err || true
+        gh api "repos/$GH_REPO/actions/runs/$RUN_ID/logs" > logs.zip 2> api.err || true
+        unzip -o -q logs.zip -d logs 2>/dev/null || true
+        cat logs/*/* logs/* 2>/dev/null | tail -c 60000 >> diag.log || true
+        { echo '\`\`\`'; cat view.err api.err 2>/dev/null; echo '\`\`\`'; echo; tail -c 55000 diag.log; } > diag.md
+        gh issue create --title "CI logs: run $RUN_ID (build)" --body-file diag.md || true
       env:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
@@ -248,11 +250,13 @@ jobs:
     steps:
     - name: Logs to an issue
       run: |
-        gh run view "$RUN_ID" --log > diag.log || true
-        tail -c 60000 diag.log > diag.md; [ -s diag.md ] || cp diag.log diag.md
-        if [ -s diag.md ]; then
-          gh issue create --title "CI logs: run $RUN_ID (dist)" --body-file diag.md
-        fi
+        set -x
+        gh run view "$RUN_ID" --log > diag.log 2> view.err || true
+        gh api "repos/$GH_REPO/actions/runs/$RUN_ID/logs" > logs.zip 2> api.err || true
+        unzip -o -q logs.zip -d logs 2>/dev/null || true
+        cat logs/*/* logs/* 2>/dev/null | tail -c 60000 >> diag.log || true
+        { echo '\`\`\`'; cat view.err api.err 2>/dev/null; echo '\`\`\`'; echo; tail -c 55000 diag.log; } > diag.md
+        gh issue create --title "CI logs: run $RUN_ID (dist)" --body-file diag.md || true
       env:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
