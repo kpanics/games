@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "cursed-recode",
+  "version": "0.1.0",
+  "name": "Cursed Recode",
+  "description": "Cursed Recode client",
+  "authors": ["Lunuca"],
+  "license": "All-Rights-Reserved",
+  "environment": "client",
+  "entrypoints": {
+    "preLaunch": ["cursed.recode.launch.Twin"],
+    "client": ["cursed.recode.CursedRecode"]
+  },
+  "mixins": [
+    { "config": "cursed-recode.mixins.json", "environment": "client" }
+  ],
+  "accessWidener": "cursed-recode.accesswidener",
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25"
+  }
+}

@@ -1,0 +1,27 @@
+#version 450
+// Terrain occlusion, before the frame's opaque terrain (vk/occlusion.rs): the first copy of each opaque draw command is
+// drawn only when its section was visible last frame. The second copy (the sections that were not) waits for the
+// test against this frame's depth (occlusion_cull.comp).
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Commands { uint commands[]; };
+layout(std430, binding = 1) readonly buffer Ids { uint ids[]; };
+layout(std430, binding = 2) readonly buffer Last { uint last[]; };
+layout(push_constant) uniform Push {
+    uint commandBase; // word of the first command
+    uint count;
+    uint idBase;      // word of the first section's mesh id
+    uint visCount;
+} p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.count) {
+        return;
+    }
+    // VkDrawIndexedIndirectCommand: indexCount, instanceCount, firstIndex, vertexOffset, firstInstance (= section).
+    uint c = p.commandBase + i * 5u;
+    uint id = ids[p.idBase + commands[c + 4u]];
+    commands[c + 1u] = id < p.visCount ? last[id] : 0u;
+}

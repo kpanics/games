@@ -1,0 +1,64 @@
+#version 450
+// Water that moves (engine/gpu.rs): the height of the water's surface over 64 x 64 blocks round the camera, four cells
+// to a block, addressed modulo 256 cells. One step of the wave equation per dispatch, from one image into the other:
+// each cell pulled toward its neighbours, moving on by its speed (the step before), slowly calmed. The player moving
+// through water pushes it down, rain drops in it.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// x: the height now, y: the step before.
+layout(set = 0, binding = 0, rg16f) uniform readonly image2D WaterIn;
+layout(set = 0, binding = 1, rg16f) uniform writeonly image2D WaterOut;
+
+layout(push_constant) uniform Step {
+    // The player's feet in cells (xz, world, four a block), how hard they push (z), the rain (w).
+    vec4 Mover;
+    // The step's number (for the rain's drops), the grid's lowest cell (yz: x, z).
+    ivec4 Info;
+};
+
+const int SIZE = 256;
+const int MASK = SIZE - 1;
+
+uint hash(uvec3 v) {
+    uint h = v.x * 73856093u ^ v.y * 19349663u ^ v.z * 83492791u;
+    h ^= h >> 13;
+    h *= 0x5bd1e995u;
+    h ^= h >> 15;
+    return h;
+}
+
+void main() {
+    ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    vec2 here = imageLoad(WaterIn, t).xy;
+    float h = here.x;
+    float before = here.y;
+    float around = imageLoad(WaterIn, (t + ivec2(1, 0)) & MASK).x + imageLoad(WaterIn, (t - ivec2(1, 0)) & MASK).x
+                 + imageLoad(WaterIn, (t + ivec2(0, 1)) & MASK).x + imageLoad(WaterIn, (t - ivec2(0, 1)) & MASK).x;
+    // c^2 dt^2 / dx^2 = 0.25: steady for the grid.
+    float next = (2.0 * h - before + 0.25 * (around - 4.0 * h)) * 0.985;
+    // The world cell this texel holds now.
+    ivec2 origin = Info.yz;
+    ivec2 world = origin + ((t - origin) & MASK);
+    vec2 d = vec2(world) + 0.5 - Mover.xy;
+    float r2 = dot(d, d);
+    // A dip with a rise round it that sum to nothing: the water is pushed aside, never lowered as a whole.
+    // Pushed in short beats (every sixth step): each beat a ring that runs out, the beats a wake behind.
+    if (Mover.z > 0.0 && r2 < 16.0 && Info.x % 6 == 0) {
+        float q = r2 / 2.5;
+        next -= Mover.z * (1.0 - q) * exp(-q) * 0.7;
+    }
+    // Rain: a few drops a step over the grid, each a small dent.
+    if (Mover.w > 0.0) {
+        uint drop = hash(uvec3(uint(world.x), uint(world.y), uint(Info.x)));
+        if (float(drop & 0xFFFFu) / 65535.0 < 0.00025 * Mover.w) {
+            next -= 0.35;
+        }
+        // And the same drop's rise round it next door, so the rain lowers nothing either.
+        uint near = hash(uvec3(uint(world.x + 1), uint(world.y), uint(Info.x)));
+        if (float(near & 0xFFFFu) / 65535.0 < 0.00025 * Mover.w) {
+            next += 0.0875;
+        }
+    }
+    imageStore(WaterOut, t, vec4(clamp(next, -2.0, 2.0), h, 0.0, 0.0));
+}

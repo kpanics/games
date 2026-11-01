@@ -1,0 +1,23 @@
+# сборка и игра
+/out/
+/build/
+/run/
+!/run/options.txt
+/tools/decomp/
+*.log
+
+# библиотеки восстанавливаются скриптом tools/setup-libs.py
+/libs/
+/tools/*.jar
+
+# Rust
+/native/target/
+/native/target-show/
+/native/target-stand/
+
+# picture dumps of the tools
+/tools/out/
+
+# python
+__pycache__/
+/tools/cs2pack/exceptions.txt

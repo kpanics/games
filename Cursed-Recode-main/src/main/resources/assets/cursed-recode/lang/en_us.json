@@ -1,0 +1,11 @@
+{
+  "cursed.options.engine": "Cursed graphics",
+  "cursed.options.engine.off": "Off",
+  "cursed.options.engine.low": "Low",
+  "cursed.options.engine.medium": "Medium",
+  "cursed.options.engine.high": "High",
+  "cursed.options.engine.ultra": "Ultra",
+  "cursed.options.engine.tooltip": "Low: coloured light and glow, the world drawn smaller for FPS. Medium: + shadows, reflections, moving water. High and Ultra: + soft shadows and light in the air.",
+  "cursed.options.worldScale": "World resolution",
+  "cursed.options.worldScale.tooltip": "The world is drawn smaller and put together from several frames: more FPS, the HUD stays sharp."
+}

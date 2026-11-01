@@ -1,0 +1,32 @@
+// The smoke's threads as soft points added into fixed point (resolve.comp lays them over the fading trail).
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 1, rgba32f) uniform readonly image2D State;
+layout(set = 0, binding = 2, rgba32f) uniform readonly image2D Home;
+layout(set = 0, binding = 3, r32ui) uniform uimage2D Acc;
+void main(){
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= 192u * 160u) return;
+  ivec2 ij = ivec2(int(i % 192u), int(i / 192u));
+  vec4 st = imageLoad(State, ij), hm = imageLoad(Home, ij);
+  float uHold = Sim.z, uAlpha = Sim2.z;
+  float rate = hm.z > .5 ? .16 + .1 * fract(hm.w * 7.3) : .07;
+  float life = fract(Sim.y * rate + hm.w);
+  float vI = sin(3.14159 * life) * (hm.z > .5 ? .068 : .024) * (.45 + 1.3 * min(length(st.zw), 1.2)) * (1. + .35 * uHold) * uAlpha * (1. - .45 * uHold * uHold);
+  // drawn in, a thread goes out as it reaches the ember (the ember takes it): no heap of light round it
+  vI *= mix(1., smoothstep(.04, .6, length(st.xy)), smoothstep(.15, .7, uHold));
+  if (vI <= 0.) return;
+  vec2 ndc = vec2(st.x / Sim2.x, st.y);
+  vec2 c = vec2((ndc.x * .5 + .5) * Size.x, (.5 - ndc.y * .5) * Size.y);
+  // soft puffs, not points: smoke, not dust
+  float r = max((hm.z > .5 ? 1.5 : 1.15) * Sim2.w * 1.8, .5);
+  vI *= .16;
+  ivec2 lo = ivec2(floor(c - r)), hi = ivec2(ceil(c + r));
+  for (int y = lo.y; y <= hi.y; y++) {
+    for (int x = lo.x; x <= hi.x; x++) {
+      if (x < 0 || y < 0 || x >= int(Size.x) || y >= int(Size.y)) continue;
+      vec2 d = (vec2(x, y) + .5 - c) / r;
+      if (abs(d.x) > 1. || abs(d.y) > 1.) continue;
+      imageAtomicAdd(Acc, ivec2(x, y), uint(vI * exp(-dot(d, d) * 1.8) * 4096.));
+    }
+  }
+}

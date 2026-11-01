@@ -1,0 +1,6 @@
+{
+  "options.chat.delay_instant": "Задержка чата: нет",
+  "options.exclusiveFullscreen": "Эксклюзивный полный экран",
+  "options.fullscreen.exclusive.mode": "Разрешение полного экрана",
+  "options.fullscreen.exclusive.mode.tooltip": "Работает, когда включён эксклюзивный полный экран."
+}
