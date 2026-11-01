@@ -1,0 +1,4 @@
+#!/bin/sh
+# cursed <key | registration [open|closed] | users | backup <file>>: the accounts' own commands, run as their user
+# (run as root they would leave root's files in the database's folder, and the service could not write it).
+exec runuser -u cursed -- env CURSED_DB=/var/lib/cursed/cursed.db /opt/cursed/cursed-api "$@"

@@ -1,0 +1,201 @@
+#version 450
+// The chams' ink seen (engine/ink.rs): a ray from the camera through each pixel of the frame, through the ink's grid
+// (ink_sim.comp, twice as fine as the water's) as far as the world drawn there, passing the bricks with no ink at once.
+// The water steps at most 60 times a second, the frame often: the ink is looked up a little back along the flow, as far
+// as it has gone since the last step (it moves with each frame, not in the steps' jumps); the grid's box fades out at
+// its sides rather than cutting the cloud flat. Finer than the grid, the ink's edges are eaten by a grain carried along
+// its own flow (two layers half a cycle apart, each slid along the water's velocity and started over in turn): where
+// it is thin it frays into curls, where it is thick it holds. Ink takes light out — red and green more than blue, so
+// where it is thin it is blue-black — and gives back a little of the sky's and the sun's (as far as each reaches
+// through it, its stage 7: deep in a cloud and under it, dark). Out: the light it gives (rgb) and how much ink the ray passed (a: blocks of ink at 1; what
+// shows through is exp(-TAKES a), ink_comp.comp).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D Depth;
+layout(set = 0, binding = 1) uniform sampler3D InkTex;
+layout(set = 0, binding = 2) uniform sampler3D LightTex;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D Out;
+layout(set = 0, binding = 5) uniform sampler3D VelTex;
+// the most ink in each brick of the ink's grid (eight of its cells, four of the water's a side; its stage 8)
+layout(set = 0, binding = 6) uniform sampler3D Bricks;
+// a noise repeating every 8 of its lattice (ink_sim.comp stage 9)
+layout(set = 0, binding = 7) uniform sampler3D Noise;
+// which tiles of the frame (8 by 8 pixels) a brick with ink covers (ink_part.comp stage 4): elsewhere no ray meets ink
+layout(std430, set = 0, binding = 8) readonly buffer Tiles {
+    uint tiles[];
+};
+
+layout(std140, set = 0, binding = 4) uniform Draw {
+    // clip space back to the world round the camera (the frame as drawn)
+    mat4 InvViewProj;
+    // the camera in cells from the grid's world origin (xyz), the frame's number (w)
+    vec4 Camera;
+    // the grid's world origin (cells)
+    ivec4 Origin;
+    // this picture's size (xy), the depth picture's (zw)
+    ivec4 Sizes;
+    // the sun's direction (xyz) and how bright (w); its colour
+    vec4 Sun;
+    vec4 SunColor;
+    // the sky's colour (the light round), the fog's colour
+    vec4 Sky;
+    vec4 Fog;
+    // seconds (x), how long since the water's last step (y), this frame's length (z; seconds), the ray's step (w; water
+    // cells)
+    vec4 Time;
+    // how much light a block of ink at 1 takes out, per colour (the dye's); what thin ink gives back (its albedo)
+    vec4 Takes;
+    vec4 Albedo;
+    // the frame's size (its tiles are 8 by 8 of its pixels; this picture may be half of it)
+    ivec4 Frame;
+};
+
+const vec3 SIZEF = vec3(128.0, 64.0, 128.0);
+const ivec3 BRICKS = ivec3(32, 16, 32);
+const float CELL = 0.0625;
+
+float n3(vec3 p) {
+    return textureLod(Noise, p / 8.0, 0.0).r;
+}
+
+// The ink's grain: three octaves, ridged a little (curls rather than blobs). The finer two give way to their mean where
+// the grain moves further in a frame than they are fine (they would flicker, not move).
+float detail(vec3 p, float wb, float wc) {
+    float a = n3(p);
+    float b = mix(0.5, n3(p * 2.17 + 7.1), wb);
+    float c = mix(0.5, n3(p * 4.63 + 13.7), wc);
+    return clamp(0.55 * (1.0 - abs(a * 2.0 - 1.0)) + 0.3 * b + 0.15 * c, 0.0, 1.0);
+}
+
+// The grain where the ink is, carried by the water: `w` the world cell, `v` the velocity there (cells a second).
+float flowing(vec3 w, vec3 v) {
+    const float CYCLE = 1.4;
+    // how far the grain goes in this frame (its coarsest octave's units)
+    float moved = length(v) * Time.z * 0.42;
+    float wb = 1.0 - smoothstep(0.2, 0.5, moved * 2.17);
+    float wc = 1.0 - smoothstep(0.15, 0.4, moved * 4.63);
+    float s = Time.x / CYCLE;
+    float a = fract(s);
+    float b = fract(s + 0.5);
+    float ga = detail((w - v * a * CYCLE) * 0.42 + floor(s) * 17.31, wb, wc);
+    float gb = detail((w - v * b * CYCLE) * 0.42 + floor(s + 0.5) * 17.31 + 5.3, wb, wc);
+    // each layer weighs most in the middle of its cycle (never seen jumping back)
+    float wa = 1.0 - abs(a * 2.0 - 1.0);
+    return (ga * wa + gb * (1.0 - wa));
+}
+
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, Sizes.xy))) {
+        return;
+    }
+    // the frame's pixel this one stands for, its tile
+    ivec2 fp = px * Frame.xy / Sizes.xy;
+    if (tiles[(fp.y >> 3) * ((Frame.x + 7) >> 3) + (fp.x >> 3)] == 0u && Fog.w >= 0.0) {
+        imageStore(Out, px, vec4(0.0));
+        return;
+    }
+    vec2 uv = (vec2(px) + 0.5) / vec2(Sizes.xy);
+    float d = textureLod(Depth, uv, 0.0).r;
+    // reversed depth: 0 is the sky (the ray goes on to the grid's end)
+    vec4 wp = InvViewProj * vec4(uv * 2.0 - 1.0, max(d, 1e-7), 1.0);
+    vec3 hit = wp.xyz / wp.w;
+    vec3 rd = normalize(hit);
+    float reach = d <= 0.0 ? 1e6 : length(hit) / CELL;
+    // in cells from the grid's world origin
+    vec3 o = Camera.xyz;
+    vec3 inv = 1.0 / (abs(rd) + 1e-6) * sign(rd + 1e-9);
+    vec3 lo = vec3(0.0);
+    // to the last cell's middle (past it the repeating texture brings in the far side)
+    vec3 hi = SIZEF - 1.0;
+    // the texture holds a world cell at that cell modulo its size
+    vec3 world = vec3(Origin.xyz) + 0.5;
+    // the ink's grid: its cells' middles a quarter of a water cell off
+    vec3 worldInk = vec3(Origin.xyz) + 0.25;
+    vec3 t0 = (lo - o) * inv;
+    vec3 t1 = (hi - o) * inv;
+    float ta = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
+    float tb = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+    ta = max(ta, 0.0);
+    tb = min(tb, reach);
+    // how much ink the ray passed (blocks of ink at 1), the light it gave back, how much of what is behind shows
+    // through so far (exp(-TAKES depth), kept as it goes)
+    float depth = 0.0;
+    vec3 light = vec3(0.0);
+    vec3 trans = vec3(1.0);
+    if (tb > ta) {
+        // half an ink cell; each pixel's steps a little apart from its neighbours' (the same each frame: a pattern
+        // that changed every frame would shimmer), kept on its own spacing past the bricks it skips
+        float step_ = Time.w;
+        float tj = ta + step_ * ign(vec2(px));
+        float t = tj;
+        vec3 ambient = Sky.rgb * 0.55 + Fog.rgb * 0.25;
+        vec3 sun = SunColor.rgb * Sun.w;
+        float mu = dot(rd, normalize(Sun.xyz));
+        // a little more light forward toward the sun (Henyey-Greenstein, g 0.4)
+        float g = 0.4;
+        float phase = (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5) * 0.25;
+        // what thin ink gives back: as dye lit in water (blue-grey as made)
+        vec3 albedo = Albedo.rgb;
+        for (int i = 0; i < 1200 && t < tb; i++) {
+            vec3 p = o + rd * t;
+            // an empty brick: on to its far side
+            ivec3 brick = ivec3(floor((p + vec3(Origin.xyz)) * 0.25));
+            if (texelFetch(Bricks, brick & (BRICKS - 1), 0).r < 0.002) {
+                vec3 lo_ = vec3(brick * 4 - Origin.xyz);
+                vec3 far = (mix(lo_, lo_ + 4.0, step(0.0, rd + 1e-9)) - o) * inv;
+                float tf = max(t, min(min(far.x, far.y), far.z)) + 0.01;
+                t = tj + ceil((tf - tj) / step_) * step_;
+                continue;
+            }
+            vec3 tc = (p + world) / SIZEF;
+            // where the ink here was at the last step (the flow carries it on between steps)
+            vec3 v = textureLod(VelTex, tc, 0.0).xyz;
+            vec3 pa = p - v * Time.y;
+            float ink = textureLod(InkTex, (pa + worldInk) / SIZEF, 0.0).r;
+            if (ink >= 0.002) {
+                // the grid's box: faded out over its last cells (its floor a little below the feet, not faded much)
+                vec3 e0 = p - lo;
+                vec3 e1 = hi - p;
+                ink *= smoothstep(0.0, 14.0, min(min(e0.x, e1.x), min(e0.z, e1.z))) * smoothstep(0.0, 4.0, e0.y) * smoothstep(0.0, 10.0, e1.y);
+                // finer than the grid: its edges eaten by the flowing grain, its body kept
+                float grain = flowing(pa + vec3(Origin.xyz), v);
+                float thick = ink / (ink + 0.03);
+                // dye barely spreads in water: its edge sharp (a few pixels), not a fog thinning out
+                float keep = clamp((thick - 0.45 * grain) / max(1.0 - 0.45 * grain, 1e-3) * 3.5, 0.0, 1.0);
+                ink *= keep * (0.8 + 0.4 * grain);
+            }
+            if (ink < 0.002) {
+                // nothing here: a longer step
+                t += step_ * 2.0;
+                continue;
+            }
+            float ds = step_ * CELL;
+            vec3 st = exp(-Takes.rgb * ink * ds);
+            vec2 lit = textureLod(LightTex, tc, 0.0).rg;
+            light += trans * (1.0 - st) * albedo * (ambient * lit.g + sun * lit.r * phase * 4.0);
+            trans *= st;
+            depth += ink * ds;
+            if (depth * min(min(Takes.r, Takes.g), Takes.b) > 6.0) {
+                break;
+            }
+            t += step_;
+        }
+    }
+    if (Fog.w < 0.0) {
+        // dev (CURSED_DEV_INKDEBUG): the grid's box tinted green where the ray crosses it, the ink it met in red
+        float most = 0.0;
+        for (int i = 0; i < 300 && tb > ta; i++) {
+            float t = ta + float(i) * (tb - ta) / 300.0;
+            most = max(most, textureLod(InkTex, (Camera.xyz + rd * t + worldInk) / SIZEF, 0.0).r);
+        }
+        light = vec3(min(most * 4.0, 1.0), tb > ta ? 0.08 : 0.0, 0.0);
+        depth = 0.0;
+    }
+    imageStore(Out, px, vec4(light, depth));
+}

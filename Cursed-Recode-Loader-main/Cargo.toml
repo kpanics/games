@@ -1,0 +1,122 @@
+[package]
+name = "cursed_recode"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# cdylib for the game; rlib so `cargo test` can reach the parts that are tested without the game.
+crate-type = ["cdylib", "rlib"]
+
+# Cursed Recode as one program: the window before the game, and the game's Java in the same process (src/bin/host.rs).
+[[bin]]
+name = "CursedRecode"
+path = "src/bin/host.rs"
+
+[dependencies]
+# The license (license.rs): the server's signature over a start, the computer's parts hashed (device.rs).
+ed25519-dalek = "2"
+sha2 = "0.10"
+# The loader (loader/sync.rs, Cursed's): the build's files come compressed and as patches from the build before (zstd
+# --patch-from), the game's assets are named by their SHA-1.
+zstd = { version = "0.13", default-features = false }
+sha1 = "0.10"
+# Vulkan itself: the bindings only, every decision about memory, commands and frames is ours (src/vk).
+ash = "0.38"
+jni-sys = "0.3"
+# Inflates the launch title's mask (assets/launch, zlib) — pure Rust, inflate only.
+miniz_oxide = "0.8"
+# Unpacks the runtime of a build that comes as one object (the dist on GitHub: `runtime.zip`).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Decodes the launch's sounds and her track (assets/launch, Ogg Vorbis) — pure Rust.
+lewton = "0.10"
+# The menus' data from Java (menus/): each screen of the game as JSON.
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+# The existing Cursed wings used for cross-client player badges.
+image-webp = "0.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+    "Win32_System_Time",
+    "Win32_System_Console",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Input_KeyboardAndMouse",
+    # Discord's pipe (rpc.rs)
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    # The license (license.rs, net.rs, device.rs): WinHTTP, the TPM's key and the random words, the Windows id.
+    "Win32_Networking_WinHttp",
+    "Win32_Security_Cryptography",
+    "Win32_System_Registry",
+    # the loader's language at its first start (loader/store.rs)
+    "Win32_Globalization",
+    # who else is at the machine while the game runs (loader/game.rs)
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+# The window before the game is shown by the compositor itself (twin/present.rs): Direct3D 11 takes the picture our
+# Vulkan device draws (a shared texture) into a DirectComposition swap chain with per-pixel alpha over the desktop.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    # the HUD's music: what plays on the computer (gui/media.rs)
+    "Win32_System_WinRT",
+    # the loader's shortcut on the desktop (loader/install.rs)
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Foundation",
+    # the media sessions, to find the one that plays (gui/media.rs)
+    "Foundation_Collections",
+    "Media_Control",
+    "Storage_Streams",
+] }
+
+[lints.rust]
+# MSVC's link says each time that it made an import library beside a DLL or a program: news, not a fault (Rust
+# passes the linker's words on as warnings)
+linker_messages = "allow"
+
+[profile.release]
+opt-level = 3
+# Fat LTO and one codegen unit: the whole crate is one book the decompiler has to read through, not a shelf of
+# functions it can pick off one by one. Thin LTO left the seams a dumper could walk.
+lto = "fat"
+codegen-units = 1
+incremental = false
+# Unwind stays: the game catches its own panics (lib.rs `guard`, license.rs `verify`) and a crash must still say
+# what it was. `abort` would take that away for nothing a cracker cares about.
+panic = "unwind"
+# Line tables only: a panic's message says where, the DLL stays small. The release build takes even these off
+# (tools/Release.java) — they are a map of the source for anyone who opens the DLL.
+debug = "line-tables-only"
+strip = "symbols"
+
+# The game started from IntelliJ (cursed.recode.dev.IdeaBoot): optimized as release is, but built in seconds after a
+# change instead of minutes — no whole-crate LTO, the crate compiled in parts and kept between builds. Never what the
+# players get: tools/Release.java and run.cmd build `release`.
+[profile.dev-run]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

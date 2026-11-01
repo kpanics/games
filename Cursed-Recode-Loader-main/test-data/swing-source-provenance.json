@@ -1,0 +1,15 @@
+{
+  "cases": 1989,
+  "source_sha256": {
+    "newcode 2.09/src/net/minecraft/client/renderer/FirstPersonRenderer.java": "4836ba7563d9fe2c15671b2010a69e9a917d9d2f4242b751ba713d56cb9b4083",
+    "Catlavan 1.16.5/src/main/java/net/minecraft/client/renderer/FirstPersonRenderer.java": "8863965543dda84bec90890647ed9f05a092514d4fdce43323c60051eb82593c",
+    "Catlavan 1.16.5/src/main/java/catlavan/module/visuals/SwingAnimationsModule.java": "d143a6de4a48e0dd3d9e62ff0e9249a1c1340b392414ccaa6e40b33116193b3a",
+    "nurik/rw/core/SwingAnimationVariantHandler.java": "44ad3b0d32c9bb4009e88700c92d9c936640c423d3faccf79a10d6d577654acb",
+    "nurik/rw/core/IlsIskr.java": "55862cbfe623b1f49c1db76c121c08faaa33c29b6ad9019e693c59f7a340b769",
+    "nurik/rw/core/SwingAnimationStaticPoseHandler.java": "95b754820764b014318f720c4d0e3105571404449c6e8e8f477526406fa7314d",
+    "nurik/rw/core/SwingAnimationMultiAxisHandler.java": "fb51ffd34dd36d467491bc96074dd695251ea8fa6bf716a401771af8f3317681"
+  },
+  "scope": "ordered transform formulas; not in-game visual validation",
+  "nurik_symbols": "restored source; axis mapping inferred from vanilla handler; clock input supplied explicitly",
+  "rockstar": "source directory empty; no original renderer available"
+}

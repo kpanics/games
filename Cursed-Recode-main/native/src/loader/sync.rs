@@ -146,6 +146,10 @@ struct Job {
     how: How,
     /// What to fall back on when a patch does not work: the file packed or whole.
     fallback: How,
+    /// A folder of the build that comes as one object (`runtime.zip` → `runtime/`), unpacked in place
+    /// after its own hash is checked (the dist on GitHub: a few thousand files of a JDK are one
+    /// download there, not one each).
+    zip: bool,
 }
 
 impl Job {
@@ -214,7 +218,8 @@ fn plan_files(home: &Path, m: &Manifest, files: &Mutex<Files>, progress: &Progre
         for _ in 0..4 {
             s.spawn(|| loop {
                 let Some(f) = queue.lock().unwrap().next() else { break };
-                let have = current_sha(home, &f.path, files);
+                // A zip entry is done when its folder is in place: the object itself is gone once unpacked.
+                let have = if f.kind == "zip" { zip_done(home, f).then(|| f.sha256.clone()) } else { current_sha(home, &f.path, files) };
                 progress.checked.fetch_add(1, Ordering::SeqCst);
                 if have.as_deref() == Some(f.sha256.as_str()) {
                     continue;
@@ -227,7 +232,7 @@ fn plan_files(home: &Path, m: &Manifest, files: &Mutex<Files>, progress: &Progre
                     Some((from, size)) => How::Patch { from, size },
                     None => plain.clone(),
                 };
-                jobs.lock().unwrap().push(Job { path: f.path.clone(), hash: f.sha256.clone(), size: f.size, how, fallback: plain });
+                jobs.lock().unwrap().push(Job { path: f.path.clone(), hash: f.sha256.clone(), size: f.size, how, fallback: plain, zip: f.kind == "zip" });
             });
         }
     });
@@ -240,7 +245,7 @@ fn plan_assets(home: &Path, m: &Manifest) -> Vec<Job> {
     asset_objects(home, m)
         .into_iter()
         .filter(|(sha1, size)| store::stat(&home.join(asset_path(sha1))).map(|(s, _)| s) != Some(*size))
-        .map(|(sha1, size)| Job { path: asset_path(&sha1), hash: sha1, size, how: How::Asset, fallback: How::Asset })
+        .map(|(sha1, size)| Job { path: asset_path(&sha1), hash: sha1, size, how: How::Asset, fallback: How::Asset, zip: false })
         .collect()
 }
 
@@ -283,11 +288,21 @@ fn fetch_one(home: &Path, job: &Job, token: &str, progress: &Progress, counted_h
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", job.path))?;
     }
-    let url = match &job.how {
-        How::Patch { from, .. } => format!("/api/dist/patch/{from}/{}", job.hash),
-        How::Packed(_) => format!("/api/dist/object/{}?z=1", job.hash),
-        How::Whole(_) => format!("/api/dist/object/{}", job.hash),
-        How::Asset => format!("/api/dist/asset/{}", job.hash),
+    let url = if api::github() {
+        // The dist on GitHub: the files are the release's assets (`object-<sha256>`), and the game's
+        // assets are Mojang's own, off Mojang's own CDN — nothing of theirs is ours to mirror. Patches
+        // a static dist does not make; the whole file is what there is.
+        match &job.how {
+            How::Asset => format!("https://resources.download.minecraft.net/{}/{}", &job.hash[..2], job.hash),
+            How::Patch { .. } | How::Packed(_) | How::Whole(_) => format!("{}/object-{}", api::base(), job.hash),
+        }
+    } else {
+        match &job.how {
+            How::Patch { from, .. } => format!("/api/dist/patch/{from}/{}", job.hash),
+            How::Packed(_) => format!("/api/dist/object/{}?z=1", job.hash),
+            How::Whole(_) => format!("/api/dist/object/{}", job.hash),
+            How::Asset => format!("/api/dist/asset/{}", job.hash),
+        }
     };
     let counted = |n: usize| {
         progress.net_down.store(false, Ordering::Relaxed);
@@ -372,12 +387,68 @@ fn fetch_one(home: &Path, job: &Job, token: &str, progress: &Progress, counted_h
         let _ = std::fs::remove_file(&part);
         return Err(format!("{}: not the file of the build", job.path));
     }
+    if job.zip {
+        // A folder of the build as one object: unpacked beside where it lives, the marker of its being
+        // the build's inside. The bytes were the build's before they were a folder (the hash above).
+        let dir = zip_dir(&full);
+        unpack_zip(&part, &dir).map_err(|e| format!("{}: {e}", job.path))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", job.path))?;
+        std::fs::write(dir.join(format!(".unpacked-{}", &job.hash[..16])), job.hash.as_bytes()).map_err(|e| format!("{}: {e}", job.path))?;
+        let _ = std::fs::remove_file(&part);
+        return Ok(());
+    }
     put_in_place(&part, &full).map_err(|e| format!("{}: {e}", job.path))?;
     Ok(())
 }
 
 /// What a file moved aside is called after: `<name>.cursed-old-<time>` beside it (see put_in_place).
 const ASIDE: &str = ".cursed-old-";
+
+/// The folder a `zip` entry of the build unpacks into: the file's own name without its ending
+/// (`runtime.zip` → `runtime/`), beside where the object itself would sit.
+fn zip_dir(full: &Path) -> PathBuf {
+    full.with_extension("")
+}
+
+/// Whether a `zip` entry is already in place: its folder is, with this build's own marker in it.
+/// The marker names the object the folder came out of, so a newer build unpacks again.
+fn zip_done(home: &Path, f: &Entry) -> bool {
+    zip_dir(&home.join(&f.path)).join(format!(".unpacked-{}", &f.sha256[..16])).is_file()
+}
+
+/// One object of the build opened into its folder (`runtime.zip` → `runtime/`). A single top-level
+/// folder inside (the JDK's own `jdk-25.0.4+7/...`) is peeled off; anything else is kept as it lies.
+/// Every member lands by `enclosed_name`, never by the name it says: a zip that says `..\x` is a zip
+/// that unpacks nothing.
+fn unpack_zip(object: &Path, into: &Path) -> Result<(), String> {
+    let f = File::open(object).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
+    let names: Vec<PathBuf> = (0..archive.len())
+        .filter_map(|i| {
+            let e = archive.by_index(i).ok()?;
+            (!e.is_dir()).then(|| e.enclosed_name()).flatten()
+        })
+        .collect();
+    // the one top-level folder, if every member sits under one and the same
+    let peel = {
+        let tops = names.iter().map(|n| n.components().next()).collect::<std::collections::BTreeSet<_>>();
+        tops.len() == 1 && tops.iter().next().is_some_and(|t| t.is_some()) && names.iter().any(|n| n.components().count() >= 2)
+    };
+    for name in &names {
+        let rel: PathBuf = if peel { name.components().skip(1).collect() } else { name.clone() };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let out = into.join(&rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", rel.display()))?;
+        }
+        let mut e = archive.by_name(&name.to_string_lossy()).map_err(|e| e.to_string())?;
+        let mut o = File::create(&out).map_err(|e| format!("{}: {e}", rel.display()))?;
+        std::io::copy(&mut e, &mut o).map_err(|e| format!("{}: {e}", rel.display()))?;
+    }
+    Ok(())
+}
 
 /// The new file in the old one's place. A file in use cannot be written over on Windows (04.10, a player: "bin/
 /// cursed_native.dll: access denied", the game, or a process of it left behind, still holding the library), but it
@@ -583,7 +654,11 @@ pub fn fetch_loader(entry: &Entry, token: &str, into: &Path) -> Result<(), Strin
     let mut h = Sha256::new();
     let mut out = BufWriter::new(File::create(into).map_err(|e| e.to_string())?);
     let packed = entry.z.is_some();
-    let path = format!("/api/dist/object/{}{}", entry.sha256, if packed { "?z=1" } else { "" });
+    let path = if api::github() {
+        format!("{}/object-{}", api::base(), entry.sha256)
+    } else {
+        format!("/api/dist/object/{}{}", entry.sha256, if packed { "?z=1" } else { "" })
+    };
     let mut got = Vec::new();
     let status = api::fetch(&path, token, &mut |chunk| {
         got.extend_from_slice(chunk);

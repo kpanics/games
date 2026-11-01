@@ -122,7 +122,12 @@ pub fn command(home: &Path, m: &Manifest, memory: u32, login: &str, pair_ticket:
     }
     let least = launch["memory"]["least"].as_u64().unwrap_or(2048) as u32;
     let mut cmd = Command::new(&host);
-    cmd.arg("--jdk").arg(local(home, launch["jdk"].as_str().ok_or("launch")?));
+    // The build's own Java, when it is where the build says; a build that brings none (the dist on
+    // GitHub may) leaves the finding to the host itself: the `runtime` folder beside it, then JAVA_HOME.
+    let jdk = local(home, launch["jdk"].as_str().ok_or("launch")?);
+    if jdk.join("bin").is_dir() {
+        cmd.arg("--jdk").arg(jdk);
+    }
     cmd.arg(format!("-Xmx{}m", memory.max(least)));
     for a in launch["jvm"].as_array().into_iter().flatten().filter_map(|a| a.as_str()) {
         cmd.arg(fill(a, &root));

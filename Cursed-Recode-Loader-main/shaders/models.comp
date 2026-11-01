@@ -1,0 +1,117 @@
+#version 450
+// Entity models' and items' vertices on the GPU (vk/models.rs): one workgroup per job — a drawn model part, or a run of
+// an item's quads — writes its vertices into the game's vertex buffer in DefaultVertexFormat.ENTITY (36 bytes), the
+// bytes ModelPart.Cube.compile / VertexConsumer.putBakedQuad would write. Every product and sum is `precise` (no fused
+// multiply-add), as JOML computes them with joml.useMathFma off: Matrix4f.transformPosition is
+// m00·x + (m10·y + (m20·z + m30)), Matrix3f.transform the same without the translation. Poses with untrusted normals
+// (they need a normalize) stay on the CPU (cursed.recode.scene.NativeModels, NativeItems).
+
+layout(local_size_x = 32) in;
+
+// Per vertex, 9 words (scene/models.rs GPU_MESH): x y z (a part's already / 16), u, v, the face's normal x y z, info.
+// info, items only: bits 0-3 light emission, bit 4 tinted, bits 8-15 tint index (255: none of the submit's layers).
+layout(std430, set = 0, binding = 0) readonly buffer Mesh { uint mesh[]; };
+// Per job, 32 words (vk/models.rs JOB): pose m00 m01 m02 m10 m11 m12 m20 m21 m22 m30 m31 m32, normal matrix
+// n00 n01 n02 n10 n11 n12 n20 n21 n22, first vertex, vertex count, (source offset), colour ABGR, overlay, light,
+// flags (1 identity pose, 2 translation pose, 4 item quads; bits 8-9 the item's tint layers here), then for a part:
+// (part), (colour ARGB) — for item quads: tint layer 0 and 1 ABGR —, destination word, then for a part the bend at a cut
+// limb's half's cut (radians: its corners marked in the mesh turn by it, Living Motion's mitred joints).
+layout(std430, set = 0, binding = 1) readonly buffer Jobs { uint jobs[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer Out { uint verts[]; };
+layout(push_constant) uniform Push { uint count; } push;
+
+const uint NO_DESTINATION = 0xFFFFFFFFu;
+
+float word(uint at) {
+    return uintBitsToFloat(jobs[at]);
+}
+
+// BufferBuilder.normalIntValue: (byte) ((int) (Mth.clamp(c, -1, 1) * 127) & 0xFF).
+uint normalByte(float c) {
+    precise float s = (c < -1.0 ? -1.0 : min(c, 1.0)) * 127.0;
+    return uint(int(s)) & 0xFFu;
+}
+
+void main() {
+    uint job = gl_WorkGroupID.y * 65535u + gl_WorkGroupID.x;
+    if (job >= push.count) {
+        return;
+    }
+    uint b = job * 32u;
+    uint dst = jobs[b + 30u];
+    if (dst == NO_DESTINATION) {
+        return;
+    }
+    float m00 = word(b), m01 = word(b + 1u), m02 = word(b + 2u);
+    float m10 = word(b + 3u), m11 = word(b + 4u), m12 = word(b + 5u);
+    float m20 = word(b + 6u), m21 = word(b + 7u), m22 = word(b + 8u);
+    float m30 = word(b + 9u), m31 = word(b + 10u), m32 = word(b + 11u);
+    float n00 = word(b + 12u), n01 = word(b + 13u), n02 = word(b + 14u);
+    float n10 = word(b + 15u), n11 = word(b + 16u), n12 = word(b + 17u);
+    float n20 = word(b + 18u), n21 = word(b + 19u), n22 = word(b + 20u);
+    uint first = jobs[b + 21u];
+    uint count = jobs[b + 22u];
+    uint color = jobs[b + 24u];
+    uint overlay = jobs[b + 25u];
+    uint light = jobs[b + 26u];
+    uint flags = jobs[b + 27u];
+    bool item = (flags & 4u) != 0u;
+    uint layers = (flags >> 8) & 3u;
+    float bend = item ? 0.0 : word(b + 31u);
+    float bs = sin(bend), bc = cos(bend);
+    for (uint v = gl_LocalInvocationID.x; v < count; v += 32u) {
+        uint s = (first + v) * 9u;
+        float x = uintBitsToFloat(mesh[s]), y = uintBitsToFloat(mesh[s + 1u]), z = uintBitsToFloat(mesh[s + 2u]);
+        if (bend != 0.0 && (mesh[s + 8u] & 0x80000000u) != 0u) {
+            // a corner on a cut half's cut: turned about the line there, so the two halves meet mitred
+            float depth = float(int((mesh[s + 8u] >> 16) & 255u) - 128) / 16.0;
+            float dz = z - depth;
+            y = y - bs * dz;
+            z = depth + bc * dz;
+        }
+        precise float px, py, pz;
+        if ((flags & 1u) != 0u) {
+            px = x;
+            py = y;
+            pz = z;
+        } else if ((flags & 2u) != 0u) {
+            px = x + m30;
+            py = y + m31;
+            pz = z + m32;
+        } else {
+            px = m00 * x + (m10 * y + (m20 * z + m30));
+            py = m01 * x + (m11 * y + (m21 * z + m31));
+            pz = m02 * x + (m12 * y + (m22 * z + m32));
+        }
+        float nx = uintBitsToFloat(mesh[s + 5u]), ny = uintBitsToFloat(mesh[s + 6u]), nz = uintBitsToFloat(mesh[s + 7u]);
+        precise float qx = n00 * nx + (n10 * ny + n20 * nz);
+        precise float qy = n01 * nx + (n11 * ny + n21 * nz);
+        precise float qz = n02 * nx + (n12 * ny + n22 * nz);
+        uint c = color;
+        uint l = light;
+        if (item) {
+            uint info = mesh[s + 8u];
+            if ((info & 16u) != 0u) {
+                uint index = (info >> 8) & 255u;
+                c = index < layers ? jobs[b + 28u + index] : 0xFFFFFFFFu;
+            }
+            // QuadInstance.getLightCoordsWithEmission.
+            uint emission = info & 15u;
+            if (emission != 0u) {
+                uint sky = max((light >> 20) & 15u, emission);
+                uint block = max((light >> 4) & 15u, emission);
+                l = (block << 4) | (sky << 20);
+            }
+        }
+        uint o = dst + v * 9u;
+        verts[o] = floatBitsToUint(px);
+        verts[o + 1u] = floatBitsToUint(py);
+        verts[o + 2u] = floatBitsToUint(pz);
+        verts[o + 3u] = c;
+        verts[o + 4u] = mesh[s + 3u];
+        verts[o + 5u] = mesh[s + 4u];
+        verts[o + 6u] = overlay;
+        verts[o + 7u] = l;
+        verts[o + 8u] = normalByte(qx) | (normalByte(qy) << 8) | (normalByte(qz) << 16);
+    }
+}

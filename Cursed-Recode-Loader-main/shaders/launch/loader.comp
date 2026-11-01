@@ -1,0 +1,33 @@
+// The loader's window (loader/app.rs, Cursed Recode.exe): its title bar on top (chrome/, the game window's own), under
+// it the launch's picture (the valley, or its outlines while the game comes) with the menus' picture over it (gui.comp:
+// straight alpha). The window is its own: nothing of the desktop shows. Out: BGRA (the compositor's shared texture).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D Card;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D Out;
+layout(set = 0, binding = 3, std140) uniform LoaderWin {
+    vec4 A;   // the window's size (px), its bar's height, how much of it is seen (it fades in and out)
+    vec4 B;   // the picture in the window: x, y (from the top), w, h (px)
+    vec4 C;   // the bar's strength, -, -, -
+};
+layout(set = 0, binding = 4) uniform sampler2D Bar;
+layout(set = 0, binding = 5) uniform sampler2D Menu;
+
+void main(){
+  ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+  if (q.x >= int(A.x) || q.y >= int(A.y)) return;
+  vec2 p = vec2(q) + .5;
+  vec3 rgb = vec3(.012);
+  if (p.y < A.z) {
+    rgb = textureLod(Bar, vec2(p.x / A.x, p.y / A.z), 0.).rgb * C.x;
+  } else {
+    vec2 uv = (p - B.xy) / B.zw;
+    if (uv.x >= 0. && uv.x <= 1. && uv.y >= 0. && uv.y <= 1.) {
+      vec3 card = textureLod(Card, uv, 0.).rgb;
+      vec4 m = textureLod(Menu, uv, 0.);
+      rgb = card * (1. - m.a) + m.rgb * m.a;
+    }
+  }
+  rgb += (hq(vec2(q), 3.) - .5) / 255.;
+  rgb *= A.w;
+  imageStore(Out, q, vec4(rgb.b, rgb.g, rgb.r, 1.));
+}

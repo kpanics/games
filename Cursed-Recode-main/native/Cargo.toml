@@ -26,6 +26,8 @@ ash = "0.38"
 jni-sys = "0.3"
 # Inflates the launch title's mask (assets/launch, zlib) — pure Rust, inflate only.
 miniz_oxide = "0.8"
+# Unpacks the runtime of a build that comes as one object (the dist on GitHub: `runtime.zip`).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # Decodes the launch's sounds and her track (assets/launch, Ogg Vorbis) — pure Rust.
 lewton = "0.10"
 # The menus' data from Java (menus/): each screen of the game as JSON.

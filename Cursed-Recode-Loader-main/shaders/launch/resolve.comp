@@ -1,0 +1,18 @@
+// Points added into fixed point (sparks.comp, smoke_splat.comp) into a picture, the sum cleared for the next frame.
+// Mode 0 writes them (the sparks); mode 1 lays them over what was there, which fades (the smoke's trail).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1, r32ui) uniform uimage2D Acc;
+layout(set = 0, binding = 2, rgba16f) uniform image2D Out;
+layout(push_constant) uniform Step {
+    ivec4 Info;    // mode, width, height, -
+    vec4 Fade;     // what is left of the old, -, -, -
+};
+
+void main(){
+  ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+  if (q.x >= Info.y || q.y >= Info.z) return;
+  float v = float(imageLoad(Acc, q).r) / 4096.;
+  imageStore(Acc, q, uvec4(0u));
+  if (Info.x == 0) imageStore(Out, q, vec4(vec3(v), 0.));
+  else imageStore(Out, q, vec4(imageLoad(Out, q).rgb * Fade.x + vec3(v), 0.));
+}

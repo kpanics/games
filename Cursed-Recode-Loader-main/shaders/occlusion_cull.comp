@@ -1,0 +1,112 @@
+#version 450
+// Terrain occlusion (vk/occlusion.rs), after the first part of the opaque terrain: each section's box (a block wider on
+// every side: block models reach up to a block past their own) against the depth pyramid of what is drawn so far. A
+// section is hidden only when its nearest point is farther than the farthest depth anywhere under its box on screen;
+// whatever cannot be tested (crossing the camera plane, off screen, too big) counts as visible.
+// Commands [0, split) are the second copies of opaque draws: drawn now when visible and not drawn in the first part.
+// Commands [split, count) are translucent draws: drawn later when visible. Every section's result is this frame's
+// visibility, which decides next frame's first part.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Commands { uint commands[]; };
+layout(std430, binding = 1) readonly buffer Ids { uint ids[]; };
+layout(std430, binding = 2) readonly buffer Infos { int infos[]; };
+layout(std430, binding = 3) readonly buffer Last { uint last[]; };
+layout(std430, binding = 4) writeonly buffer Now { uint now[]; };
+layout(binding = 5) uniform sampler2D pyramid;
+// Counts: opaque draws tested, of them hidden; their indices, of them hidden (what decides whether culling pays).
+layout(std430, binding = 6) buffer Counts { uint counts[]; };
+layout(push_constant) uniform Push {
+    mat4 viewProj;   // ProjMat * ModelViewMat of the terrain
+    vec4 camera;     // xyz: the camera minus its block position; w: the margin in blocks
+    ivec4 block;     // xyz: the camera's block position; w: the pyramid's levels
+    uvec4 bases;     // first command word, first id word, first section info word, commands
+    uvec4 more;      // ids known (visibility entries), split, screen width, screen height
+} p;
+
+bool visible(uint section) {
+    uint s = p.bases.z + section * 4u;
+    ivec3 origin = ivec3(infos[s], infos[s + 1u], infos[s + 2u]);
+    vec3 lo = vec3(origin - p.block.xyz) - p.camera.xyz - vec3(p.camera.w);
+    vec3 hi = lo + vec3(16.0 + 2.0 * p.camera.w);
+    float nearest = 0.0;
+    vec2 mn = vec2(1.0e9);
+    vec2 mx = vec2(-1.0e9);
+    for (int k = 0; k < 8; k++) {
+        vec3 c = vec3((k & 1) != 0 ? hi.x : lo.x, (k & 2) != 0 ? hi.y : lo.y, (k & 4) != 0 ? hi.z : lo.z);
+        vec4 clip = p.viewProj * vec4(c, 1.0);
+        if (clip.w <= 0.05) {
+            return true;
+        }
+        vec3 ndc = clip.xyz / clip.w;
+        nearest = max(nearest, ndc.z);
+        mn = min(mn, ndc.xy);
+        mx = max(mx, ndc.xy);
+    }
+    if (nearest >= 1.0 || mx.x < -1.0 || mx.y < -1.0 || mn.x > 1.0 || mn.y > 1.0) {
+        return true;
+    }
+    vec2 size = vec2(p.more.z, p.more.w);
+    ivec2 a = ivec2(clamp((mn * 0.5 + 0.5) * size, vec2(0.0), size - 1.0));
+    ivec2 b = ivec2(clamp((mx * 0.5 + 0.5) * size, vec2(0.0), size - 1.0));
+    int extent = max(b.x - a.x, b.y - a.y) + 1;
+    // Level L's texel covers 2^(L+1) pixels: the box then spans at most two texels each way.
+    int level = max(0, int(ceil(log2(float(extent)))) - 1);
+    if (level >= p.block.w) {
+        return true;
+    }
+    ivec2 lim = textureSize(pyramid, level) - 1;
+    ivec2 ta = min(a >> (level + 1), lim);
+    ivec2 tb = min(b >> (level + 1), lim);
+    float far = min(
+        min(texelFetch(pyramid, ta, level).r, texelFetch(pyramid, ivec2(tb.x, ta.y), level).r),
+        min(texelFetch(pyramid, ivec2(ta.x, tb.y), level).r, texelFetch(pyramid, tb, level).r));
+    return nearest >= far;
+}
+
+shared uint groupTested;
+shared uint groupHidden;
+shared uint groupIndices;
+shared uint groupHiddenIndices;
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) {
+        groupTested = 0u;
+        groupHidden = 0u;
+        groupIndices = 0u;
+        groupHiddenIndices = 0u;
+    }
+    barrier();
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.bases.w) {
+        uint c = p.bases.x + i * 5u;
+        uint section = commands[c + 4u];
+        uint id = ids[p.bases.y + section];
+        bool shown = visible(section);
+        bool known = id < p.more.x;
+        if (known) {
+            now[id] = shown ? 1u : 0u;
+        }
+        if (i < p.more.y) {
+            bool drawn = known && last[id] != 0u;
+            commands[c + 1u] = shown && !drawn ? 1u : 0u;
+            uint indices = commands[c];
+            atomicAdd(groupTested, 1u);
+            atomicAdd(groupIndices, indices);
+            if (!shown) {
+                atomicAdd(groupHidden, 1u);
+                atomicAdd(groupHiddenIndices, indices);
+            }
+        } else {
+            commands[c + 1u] = shown ? 1u : 0u;
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && groupTested != 0u) {
+        atomicAdd(counts[0], groupTested);
+        atomicAdd(counts[1], groupHidden);
+        atomicAdd(counts[2], groupIndices);
+        atomicAdd(counts[3], groupHiddenIndices);
+    }
+}

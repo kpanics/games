@@ -1,0 +1,63 @@
+#version 450
+// Terrain occlusion (vk/occlusion.rs): up to four levels of the depth pyramid in one dispatch. Each texel holds the
+// farthest depth of what it covers (the depth is reversed: 1 at the camera, 0 far away, so the farthest is the
+// minimum). Level sizes are powers of two, each half the one before, so a workgroup's 16×16 texels of its first level
+// make the 8×8, 4×4 and 2×2 below them on its own (shared memory); the source is the depth buffer or the level above.
+// Reads past the source's edge repeat its last row and column.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D src;
+layout(r32f, binding = 1) writeonly uniform image2D dst0;
+layout(r32f, binding = 2) writeonly uniform image2D dst1;
+layout(r32f, binding = 3) writeonly uniform image2D dst2;
+layout(r32f, binding = 4) writeonly uniform image2D dst3;
+layout(push_constant) uniform Push {
+    ivec2 srcSize;
+    ivec2 dstSize;   // the first level's
+    int levels;      // how many of the four to write
+} p;
+
+shared float tile[16][16];
+
+float at(ivec2 s) {
+    return texelFetch(src, min(s, p.srcSize - 1), 0).r;
+}
+
+void put(int level, ivec2 t, float v) {
+    ivec2 size = max(p.dstSize >> level, ivec2(1));
+    if (level >= p.levels || t.x >= size.x || t.y >= size.y) {
+        return;
+    }
+    if (level == 0) {
+        imageStore(dst0, t, vec4(v));
+    } else if (level == 1) {
+        imageStore(dst1, t, vec4(v));
+    } else if (level == 2) {
+        imageStore(dst2, t, vec4(v));
+    } else {
+        imageStore(dst3, t, vec4(v));
+    }
+}
+
+void main() {
+    ivec2 l = ivec2(gl_LocalInvocationID.xy);
+    ivec2 g = ivec2(gl_WorkGroupID.xy);
+    ivec2 d = g * 16 + l;
+    ivec2 s = d * 2;
+    float v = min(min(at(s), at(s + ivec2(1, 0))), min(at(s + ivec2(0, 1)), at(s + ivec2(1, 1))));
+    put(0, d, v);
+    tile[l.y][l.x] = v;
+    for (int level = 1, n = 8; level < 4; level++, n /= 2) {
+        barrier();
+        float w = 0.0;
+        if (l.x < n && l.y < n) {
+            w = min(min(tile[l.y * 2][l.x * 2], tile[l.y * 2][l.x * 2 + 1]), min(tile[l.y * 2 + 1][l.x * 2], tile[l.y * 2 + 1][l.x * 2 + 1]));
+        }
+        barrier();
+        if (l.x < n && l.y < n) {
+            tile[l.y][l.x] = w;
+            put(level, g * n + l, w);
+        }
+    }
+}

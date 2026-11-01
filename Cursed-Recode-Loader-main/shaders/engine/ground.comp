@@ -1,0 +1,329 @@
+#version 450
+// Chams' traces on the ground (engine/ground.rs): a map of the ground round the bodies (64 by 64 blocks, 8 texels a
+// block, addressed modulo its size as it moves with them) — how much of a trace each place has, how fresh it is, the
+// height of the ground it lies on — and the trace drawn over the frame where the ground is, as its look leaves it:
+// ink soaked into the ground in stains with dark rims, a polymorphic liquid lying in wet puddles that mirror the sky,
+// a curse under which the ground dies: grey, darker towards its middle, dark vessels creeping through it.
+// Stage 0: the map a step on (fading, the bodies standing on the ground leaving theirs). Stage 1: over the frame.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D Map;
+layout(set = 0, binding = 1, rgba8) uniform image2D Canvas;
+layout(set = 0, binding = 2) uniform sampler2D Depth;
+layout(set = 0, binding = 3) uniform usampler2DArray CursedVoxels;
+layout(std140, set = 0, binding = 4) uniform U {
+    // the frame's position from its depth (reversed: 0 the sky), from the camera, on the world's axes
+    mat4 InvViewProj;
+    // the map's origin now (world texels, its lowest corner: xy), before this step (zw)
+    ivec4 Origin;
+    // the camera: its block (xyz), and where in it (xyz, 0..1)
+    ivec4 CamI;
+    vec4 CamF;
+    // x the step (s), y the look (0 ink, 1 liquid, 2 curse), z how long a trace lasts (s), w how large (1 as made)
+    vec4 Info;
+    // x seconds, y how many bodies, z the frame's width, w its height
+    vec4 Info2;
+    // the voxel window: its lowest block (xyz), its width (w); its height (x of WindowSize)
+    ivec4 Window;
+    ivec4 WindowSize;
+    // the bodies' feet from the camera (blocks), w whether they move (blocks a second)
+    vec4 Feet[8];
+    // the look's colour (linear): the ink's dye, the liquid's, the curse's dead ground; w the liquid's metal (0..1)
+    vec4 Tint;
+    vec4 Sky;
+    vec4 Horizon;
+    // the sun's direction (xyz), how much of it there is (w)
+    vec4 Sun;
+    // the liquid's depth colour (w how clear it is, 0..1); the curse's veins
+    vec4 Tint2;
+};
+layout(push_constant) uniform P {
+    int Stage;
+};
+
+const int SIZE = 512;
+const float PER_BLOCK = 8.0;
+
+// ---- noise (as chams.glsl's: gradient, no lattice) ----
+float g_hash(vec2 i) {
+    uvec2 q = uvec2(ivec2(i) + 32768);
+    uint h = (q.x * 1597334677u) ^ (q.y * 3812015801u);
+    h *= 0x27d4eb2du;
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    return float(h) * (1.0 / 4294967296.0);
+}
+
+float g_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float g[4];
+    for (int k = 0; k < 4; k++) {
+        vec2 o = vec2(k & 1, k >> 1);
+        float a = g_hash(i + o) * 6.2831853;
+        g[k] = dot(vec2(cos(a), sin(a)), f - o);
+    }
+    return 0.5 + 1.05 * mix(mix(g[0], g[1], u.x), mix(g[2], g[3], u.x), u.y);
+}
+
+float g_fbm(vec2 p, int n) {
+    float s = 0.0;
+    float a = 0.5;
+    mat2 turn = mat2(0.8, 0.6, -0.6, 0.8);
+    for (int i = 0; i < n; i++) {
+        s += a * g_noise(p);
+        p = turn * p * 2.03 + 17.1;
+        a *= 0.5;
+    }
+    return s + a;
+}
+
+// The cells round p: F2 - F1 (0 along the borders between them: a network of lines branching as vessels do).
+float g_border(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float d1 = 8.0;
+    float d2 = 8.0;
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            vec2 o = vec2(x, y);
+            float h = g_hash(i + o);
+            vec2 c = o + 0.5 + 0.42 * vec2(cos(h * 6.2831853), sin(h * 6.2831853 + 1.3)) - f;
+            float d = dot(c, c);
+            if (d < d1) {
+                d2 = d1;
+                d1 = d;
+            } else if (d < d2) {
+                d2 = d;
+            }
+        }
+    }
+    return sqrt(d2) - sqrt(d1);
+}
+
+// ---- the world ----
+// Whether a block is one a body stands on (the engine's voxel window; outside it, not).
+bool solid(ivec3 b, float fy) {
+    ivec3 r = b - Window.xyz;
+    if (r.x < 0 || r.z < 0 || r.y < 0 || r.x >= Window.w || r.z >= Window.w || r.y >= WindowSize.x) {
+        return false;
+    }
+    uint v = texelFetch(CursedVoxels, ivec3(b.x & 255, b.z & 255, b.y - Window.y), 0).r & 15u;
+    if (v == 1u || v == 5u || v == 8u || v == 11u) {
+        return true;
+    }
+    return (v == 2u && fy < 0.5) || (v == 3u && fy >= 0.5);
+}
+
+// Where a texel of the map is in the world (blocks, its middle, from the camera's block).
+vec2 texel_place(ivec2 w) {
+    return (vec2(w - CamI.xz * 8) + 0.5) / PER_BLOCK;
+}
+
+// A pattern's place: the world's blocks, wrapped every 1024 (the floats keep their precision far from 0).
+vec2 pattern_place(vec2 fromCamBlock) {
+    return vec2(CamI.xz & 1023) + fromCamBlock;
+}
+
+// How far a body's trace reaches (blocks) and how fast it is left (of a full trace a second), by the look.
+float reach() {
+    return Info.y < 0.5 ? 0.42 : Info.y < 1.5 ? 0.6 : 1.9;
+}
+
+float rate() {
+    return Info.y < 0.5 ? 4.0 : Info.y < 1.5 ? 3.0 : 1.1;
+}
+
+void step_map(ivec2 t) {
+    ivec2 w = Origin.xy + ((t - Origin.xy) & (SIZE - 1));
+    // a texel that came into the map as it moved: nothing there yet
+    bool fresh = any(lessThan(w, Origin.zw)) || any(greaterThanEqual(w, Origin.zw + SIZE));
+    vec4 v = fresh ? vec4(0.0) : imageLoad(Map, t);
+    float dt = Info.x;
+    v.r = max(v.r - dt / max(Info.z, 0.5), 0.0);
+    v.g = max(v.g - dt / 3.0, 0.0);
+    vec2 here = texel_place(w);
+    vec2 pat = pattern_place(here);
+    int n = int(Info2.y);
+    for (int i = 0; i < n; i++) {
+        vec3 feet = Feet[i].xyz + CamF.xyz;
+        // standing on the ground only (a block a tenth of a block under the feet)
+        vec3 under = vec3(CamI.xyz) + feet - vec3(0.0, 0.1, 0.0);
+        if (!solid(ivec3(floor(under)), fract(under.y))) {
+            continue;
+        }
+        float d = length(here - feet.xz);
+        float r = reach() * Info.w;
+        // a ragged edge (the curse's creeping: its fingers come and go)
+        float edge = g_fbm(pat * (Info.y > 1.5 ? 0.9 : 2.3) + vec2(Info2.x * (Info.y > 1.5 ? 0.12 : 0.0)), 3);
+        float rr = r * (0.55 + 0.75 * edge);
+        float brush = 1.0 - smoothstep(rr * 0.6, rr, d);
+        if (brush <= 0.0) {
+            continue;
+        }
+        float had = v.r;
+        v.r = min(v.r + brush * rate() * dt, 1.0);
+        v.g = max(v.g, brush);
+        // the ground's height: where it had none, the feet's; else kept as it was (a step down keeps its own)
+        float y = float(CamI.y) + feet.y;
+        v.b = had < 0.01 ? y : mix(v.b, y, brush * 0.25);
+    }
+    imageStore(Map, t, v);
+}
+
+// The map at a place (blocks from the camera's block): bilinear, nothing outside it.
+vec4 map_at(vec2 p) {
+    // (the camera's block apart, as integers: a float of the world's texels far out would lose them)
+    vec2 tf = p * PER_BLOCK - 0.5;
+    ivec2 i0 = ivec2(floor(tf));
+    vec2 f = tf - vec2(i0);
+    ivec2 i = i0 + CamI.xz * 8;
+    vec4 s = vec4(0.0);
+    for (int k = 0; k < 4; k++) {
+        ivec2 w = i + ivec2(k & 1, k >> 1);
+        bool in_map = all(greaterThanEqual(w, Origin.xy)) && all(lessThan(w, Origin.xy + SIZE));
+        vec4 v = in_map ? imageLoad(Map, w & (SIZE - 1)) : vec4(0.0);
+        float wk = ((k & 1) == 1 ? f.x : 1.0 - f.x) * ((k >> 1) == 1 ? f.y : 1.0 - f.y);
+        s += v * wk;
+    }
+    return s;
+}
+
+vec3 world_at(ivec2 px, vec2 size) {
+    vec2 uv = (vec2(px) + 0.5) / size;
+    // (the level's depth, maybe smaller than the frame: World resolution)
+    float d = textureLod(Depth, uv, 0.0).r;
+    vec4 wp = InvViewProj * vec4(uv * 2.0 - 1.0, max(d, 1e-7), 1.0);
+    return wp.xyz / wp.w;
+}
+
+vec3 sky_seen(vec3 R) {
+    vec3 c = mix(Horizon.rgb * 1.05 + 0.04, Sky.rgb * 0.75, smoothstep(0.0, 0.7, R.y));
+    c += (Horizon.rgb + 0.12) * 0.4 * exp(-(R.y * R.y) / 0.015);
+    if (Sun.w > 0.0) {
+        c += vec3(1.0, 0.97, 0.9) * pow(max(dot(R, Sun.xyz), 0.0), 900.0) * 18.0 * Sun.w;
+    }
+    return c;
+}
+
+vec3 to_linear(vec3 c) {
+    return pow(c, vec3(2.2));
+}
+
+vec3 to_srgb(vec3 c) {
+    return pow(max(c, 0.0), vec3(1.0 / 2.2));
+}
+
+void draw(ivec2 px) {
+    vec2 size = Info2.zw;
+    if (px.x >= int(size.x) || px.y >= int(size.y)) {
+        return;
+    }
+    float d = textureLod(Depth, (vec2(px) + 0.5) / size, 0.0).r;
+    if (d <= 0.0) {
+        return;
+    }
+    vec3 hit = world_at(px, size);
+    // where it is from the camera's block
+    vec3 p = hit + CamF.xyz;
+    vec4 m = map_at(p.xz);
+    if (m.r < 0.01) {
+        return;
+    }
+    // on the ground the trace lies on: a little above or below it (a block's top, a slab), the sides of the blocks
+    // just under it a little (the curse's)
+    float wy = float(CamI.y) + p.y;
+    float dy = wy - m.b;
+    // the surface's normal from the neighbours' depth
+    vec3 hx = world_at(min(px + ivec2(1, 0), ivec2(size) - 1), size) - hit;
+    vec3 hy = world_at(min(px + ivec2(0, 1), ivec2(size) - 1), size) - hit;
+    vec3 N = normalize(cross(hy, hx));
+    if (dot(N, -hit) < 0.0) {
+        N = -N;
+    }
+    float up = smoothstep(0.55, 0.85, N.y);
+    float onit = 1.0 - smoothstep(0.25, 0.7, abs(dy));
+    float look = Info.y;
+    float k = onit * (look > 1.5 ? mix(0.55, 1.0, up) * (1.0 - smoothstep(0.0, 1.2, -dy)) : up);
+    if (k <= 0.001) {
+        return;
+    }
+    vec2 pat = pattern_place(p.xz);
+    vec4 c4 = imageLoad(Canvas, px);
+    vec3 c = to_linear(c4.rgb);
+    vec3 V = normalize(-hit);
+    float t = Info2.x;
+    if (look < 0.5) {
+        // ink soaked into the ground: stains with ragged edges, a darker rim where it dried first, wet while fresh
+        float edge = g_fbm(pat * 3.1, 4) - 0.5;
+        float stain = smoothstep(0.12, 0.26, m.r + edge * 0.35) * k;
+        float rim = (smoothstep(0.12, 0.2, m.r + edge * 0.35) - smoothstep(0.2, 0.34, m.r + edge * 0.35)) * k;
+        vec3 dye = Tint.rgb;
+        vec3 soaked = c * mix(vec3(0.12, 0.13, 0.2), dye * 0.35, 0.5);
+        c = mix(c, soaked, stain * 0.9);
+        c *= 1.0 - rim * 0.35;
+        // wet: the sky in it
+        float cosv = max(dot(vec3(0.0, 1.0, 0.0), V), 0.0);
+        float fres = 0.03 + 0.97 * pow(1.0 - cosv, 5.0);
+        c += sky_seen(reflect(-V, vec3(0.0, 1.0, 0.0))) * fres * 0.5 * m.g * stain;
+    } else if (look < 1.5) {
+        // the liquid in puddles: round soft edges, the ground under it darker (wet), the sky mirrored in it
+        float edge = g_fbm(pat * 1.8, 3) - 0.5;
+        float puddle = smoothstep(0.15, 0.32, m.r + edge * 0.25) * k;
+        float metal = Tint.w;
+        float clear = Tint2.w;
+        vec3 N2 = normalize(vec3(0.0, 1.0, 0.0) + 0.04 * vec3(g_noise(pat * 6.0 + t) - 0.5, 0.0, g_noise(pat * 6.0 - t + 3.0) - 0.5));
+        float cosv = max(dot(N2, V), 0.0);
+        float base = mix(0.03, 0.75, metal);
+        float fres = base + (1.0 - base) * pow(1.0 - cosv, 5.0);
+        vec3 refl = sky_seen(reflect(-V, N2));
+        // the ground seen through it as much as it is clear, else the liquid's own dark body
+        vec3 seen = c * mix(vec3(1.0), Tint2.rgb / max(max(Tint2.r, max(Tint2.g, Tint2.b)), 1e-3), 0.45) * 0.6;
+        vec3 under = mix(Tint.rgb * 0.18 + c * 0.08, seen, clear) * (1.0 - metal * 0.8);
+        vec3 wet = mix(under, refl * mix(vec3(1.0), Tint.rgb, 0.4 * metal), fres);
+        c = mix(c, wet, puddle);
+    } else if (look < 2.5) {
+        // the curse: the ground dies under it — grey, darker towards its middle and the longer it lay, its edge
+        // creeping; dark vessels through it, finer off them; specks of ash
+        float creep = g_fbm(pat * 0.9 + vec2(t * 0.12, -t * 0.07), 4) - 0.5;
+        float zone = smoothstep(0.08, 0.3, m.r + creep * 0.45) * k;
+        float front = (smoothstep(0.08, 0.16, m.r + creep * 0.45) - smoothstep(0.16, 0.3, m.r + creep * 0.45)) * k;
+        float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        // the ground's own light and dark in the dead ground's colour
+        vec3 dead = Tint.rgb * (lum / max(dot(Tint.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.02)) * 0.95;
+        dead *= mix(1.0, 0.45, smoothstep(0.3, 1.0, m.r));
+        vec2 w = vec2(g_fbm(pat * 0.5 + vec2(t * 0.03, 0.0), 3), g_fbm(pat * 0.5 + vec2(3.7, -t * 0.03), 3)) - 0.5;
+        float trunk = 1.0 - smoothstep(0.02, 0.09, g_border(pat * 1.1 + 2.0 * w));
+        // the fine ones off the trunks, faint, and only near them (alone their cells read as tiles)
+        float near = 1.0 - smoothstep(0.05, 0.4, g_border(pat * 1.1 + 2.0 * w));
+        float fine = (1.0 - smoothstep(0.015, 0.05, g_border(pat * 3.3 + 4.5 * w + 11.0))) * 0.35 * near;
+        float vessels = clamp(trunk + fine, 0.0, 1.0) * smoothstep(0.2, 0.6, m.r + creep * 0.3);
+        dead = mix(dead, Tint2.rgb, vessels * 0.9);
+        float ash = step(0.993, g_hash(floor(pat * 16.0))) * 0.45;
+        dead = mix(dead, vec3(lum * 1.3 + 0.05), ash * zone);
+        c = mix(c, dead, zone);
+        c *= 1.0 - front * 0.45;
+    } else {
+        // the shadow: soot where it went — soft dark smudges, their edges smoky, a fine grain in them, fainter as
+        // they age
+        float edge = g_fbm(pat * 2.2 + vec2(0.0, t * 0.04), 4) - 0.5;
+        float soot = smoothstep(0.06, 0.34, m.r + edge * 0.42) * k;
+        float grain = g_fbm(pat * 9.0, 3);
+        c *= 1.0 - soot * (0.62 + 0.25 * grain);
+    }
+    imageStore(Canvas, px, vec4(to_srgb(c), c4.a));
+}
+
+void main() {
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (Stage == 0) {
+        if (g.x < SIZE && g.y < SIZE) {
+            step_map(g);
+        }
+    } else {
+        draw(g);
+    }
+}

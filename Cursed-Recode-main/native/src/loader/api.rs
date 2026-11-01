@@ -17,6 +17,15 @@ pub fn base() -> String {
     std::env::var(crate::vault::env_loader_api()).ok().filter(|b| http::parse(b).is_some()).unwrap_or_else(|| fixed.into()).trim_end_matches('/').to_string()
 }
 
+/// The dist on GitHub (a fork's way, see dist/README.md): the base is a release's download folder —
+/// `https://github.com/<owner>/<repo>/releases/download/dist` — and everything the server did is files
+/// there: `start.json` (the build's manifest with its signature, no accounts, no refusals) and
+/// `object-<sha256>` (the files of the build). The game's assets come from Mojang's own CDN, as they
+/// are Mojang's. A build like that plays on its own (license.rs: not a CURSED_RELEASE build).
+pub fn github() -> bool {
+    base().starts_with("https://github.com/")
+}
+
 /// Why a request did not give what was asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fail {
@@ -136,6 +145,21 @@ pub fn link_poll(code: &str, key: &str) -> Result<Option<Value>, Fail> {
 
 /// May this account play Recode on this computer (it is bound to it if it had none): the build, signed; a ticket.
 pub fn start(token: &str, device: &Value) -> Result<Value, Fail> {
+    if github() {
+        // The dist on GitHub: the answer is a file, not a conversation. What it says is all there is —
+        // the manifest with its signature; the tickets of a static dist are dummies a build that plays
+        // on its own never spends. A missing or bad file is the network's word, not a refusal.
+        let mut got = Vec::new();
+        let head = http::request("GET", &format!("{}/start.json", base()), &[("Accept", "application/json")], None, &mut |_, chunk| {
+            got.extend_from_slice(chunk);
+            got.len() < 16 << 20
+        })
+        .map_err(offline)?;
+        if head.status >= 300 {
+            return Err(Fail::Refused { status: head.status, error: crate::vault::offline().into(), body: Value::Null });
+        }
+        return serde_json::from_slice(&got).map_err(|_| Fail::Refused { status: head.status, error: "manifest".into(), body: Value::Null });
+    }
     call("POST", crate::vault::path_start(), Some(token), Some(&json!({ "device": device })))
 }
 
@@ -253,6 +277,11 @@ pub fn sight(token: &str, build: i64, score: i64, sights: &Value) -> Result<Valu
 }
 
 pub fn crash(token: &str, build: i64, source: &str, report: &[u8]) -> Result<(), Fail> {
+    if github() {
+        // The dist on GitHub keeps no crashes: there is no one to send them to.
+        let _ = (token, build, source, report);
+        return Ok(());
+    }
     let url = format!("{}/api/crash?build={build}&source={source}", base());
     let auth = format!("Bearer {token}");
     let headers = [("Content-Type", "text/plain; charset=utf-8"), ("Authorization", auth.as_str())];
@@ -292,6 +321,11 @@ fn touch_mac_header(ticket: &str, report: &[u8]) -> Option<(&'static str, String
 /// (the source, the header) come out of the vault: a `strings` pass is not to find them here.
 pub fn touch(token: &str, build: i64, ticket: &str, report: &[u8]) -> Result<(), Fail> {
     let source = crate::vault::touch_source();
+    if github() {
+        // The dist on GitHub keeps no notes.
+        let _ = (token, build, ticket, report);
+        return Ok(());
+    }
     if report.is_empty() {
         // no note, nothing to send
         return Err(Fail::Refused {
@@ -317,10 +351,15 @@ pub fn touch(token: &str, build: i64, ticket: &str, report: &[u8]) -> Result<(),
 /// A file of the store (`/api/dist/...`), piece by piece into `sink`. The status comes back: 200, or 403 when the leave
 /// to download has run out (start again), 401 when the session has.
 pub fn fetch(path: &str, token: &str, sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<u16, Fail> {
-    let url = format!("{}{path}", base());
-    let auth = format!("Bearer {token}");
+    // An absolute address (the dist on GitHub, Mojang's CDN for the assets): taken as it is, with no
+    // session of ours in it — those places know nothing of our tokens, and a bogus one is turned away.
+    let (url, auth) = if path.starts_with("https://") {
+        (path.to_string(), None)
+    } else {
+        (format!("{}{path}", base()), Some(format!("Bearer {token}")))
+    };
     let mut status = 0u16;
-    let head = http::request("GET", &url, &[("Authorization", auth.as_str())], None, &mut |head, chunk| {
+    let head = http::request("GET", &url, &auth.as_deref().map(|a| ("Authorization", a)).into_iter().collect::<Vec<(&str, &str)>>(), None, &mut |head, chunk| {
         status = head.status;
         head.status != 200 || sink(chunk)
     })

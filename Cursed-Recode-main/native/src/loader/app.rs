@@ -1055,6 +1055,14 @@ impl App {
                 }
             }
             "link" => {
+                // The dist on GitHub: no site behind to allow a code — the local session is the sign-in.
+                if api::github() {
+                    let s = store::Session { token: "github".into(), uid: 0, login: "Player".into() };
+                    s.save();
+                    self.session = Some(s);
+                    self.check();
+                    return;
+                }
                 self.with_device(|a| {
                     let device = a.device.clone().unwrap_or(Value::Null);
                     a.spawn(move || Done::Link(api::link(&device)));
@@ -1139,6 +1147,14 @@ impl App {
     /// After the folder: signed in already, or not.
     fn after_setup(&mut self) {
         self.session = store::Session::load();
+        // The dist on GitHub has no accounts to sign in through: this computer is the account, and it
+        // is signed in wherever it is. The session is kept as any other, so the screens after it work
+        // as they are.
+        if self.session.is_none() && api::github() {
+            let s = store::Session { token: "github".into(), uid: 0, login: "Player".into() };
+            s.save();
+            self.session = Some(s);
+        }
         if self.session.is_some() {
             self.check();
         } else {
