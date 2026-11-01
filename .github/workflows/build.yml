@@ -223,6 +223,9 @@ jobs:
 
     - name: Publish (gh release create, тег dist)
       run: |
+        rem лоадер ещё и под собственным именем: его скачивают из релиза руками,
+        rem безымянный object-sha256 игрок не отличит от сотни таких же
+        copy /y ..\dist-home\loader\recode_loader.exe ..\dist-out\recode_loader.exe >nul
         gh release view dist >nul 2>nul && gh release delete dist --cleanup-tag --yes
         gh release create dist ..\dist-out\* --title "Cursed Recode" --notes "Дистрибутив «на GitHub»: start.json + файлы билда (object-sha256). Лоадер - loader/recode_loader.exe." --latest
       env:
