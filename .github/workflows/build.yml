@@ -39,7 +39,6 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-      issues: write
     # все run-шаги по умолчанию выполняются в папке проекта и в cmd
     defaults:
       run:
@@ -110,16 +109,27 @@ jobs:
         if-no-files-found: error
         path: Cursed-Recode-main/dist/*
 
-    # Логи упавшего запуска - в Issue: их можно прочитать и снаружи (run-логи отдаются только раннеру)
-    - name: Diagnostics (logs to an issue)
-      if: failure()
-      shell: pwsh
+  # Логи упавшего запуска - в Issue: их можно прочитать и снаружи (run-логи отдаются только раннеру).
+  # Отдельной джобой, потому что лог появляется только после завершения упавшей.
+  diagnostics:
+    needs: build
+    if: always() && needs.build.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+    - name: Logs to an issue
       run: |
-        gh run view $env:GITHUB_RUN_ID --log | Select-Object -Last 1200 | Out-File -Encoding utf8 diag.log
-        gh issue create --title "CI logs: run $($env:GITHUB_RUN_ID) (build)" --body-file diag.log
-        exit 0
+        gh run view "$RUN_ID" --log > diag.log || true
+        tail -c 60000 diag.log > diag.md; [ -s diag.md ] || cp diag.log diag.md
+        if [ -s diag.md ]; then
+          gh issue create --title "CI logs: run $RUN_ID (build)" --body-file diag.md
+        fi
       env:
         GH_TOKEN: ${{ github.token }}
+        RUN_ID: ${{ github.run_id }}
 
   # Дистрибутив «на GitHub»: только push в main. Собирает билд с вшитой базой и ключом,
   # публикует Release (тег dist) и проверяет связку headless-запуском лоадера.
@@ -128,7 +138,6 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-      issues: write
     defaults:
       run:
         shell: cmd
@@ -226,12 +235,23 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
 
-    - name: Diagnostics (logs to an issue)
-      if: failure()
-      shell: pwsh
+  # Логи упавшей dist - туда же, в Issue
+  diagnostics-dist:
+    needs: dist
+    if: always() && needs.dist.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+    - name: Logs to an issue
       run: |
-        gh run view $env:GITHUB_RUN_ID --log | Select-Object -Last 1500 | Out-File -Encoding utf8 diag.log
-        gh issue create --title "CI logs: run $($env:GITHUB_RUN_ID) (dist)" --body-file diag.log
-        exit 0
+        gh run view "$RUN_ID" --log > diag.log || true
+        tail -c 60000 diag.log > diag.md; [ -s diag.md ] || cp diag.log diag.md
+        if [ -s diag.md ]; then
+          gh issue create --title "CI logs: run $RUN_ID (dist)" --body-file diag.md
+        fi
       env:
         GH_TOKEN: ${{ github.token }}
+        RUN_ID: ${{ github.run_id }}
