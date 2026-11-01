@@ -1,0 +1,59 @@
+
+// The point of pixel `p` at depth `z`, round the camera.
+vec3 cursed_point(ivec2 p, float z) {
+    vec2 ndc = (vec2(p) + 0.5) / vec2(Size.xy) * 2.0 - 1.0;
+    vec4 w = InvViewProj * vec4(ndc, z, 1.0);
+    return w.xyz / w.w;
+}
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= Size.z || q.y >= Size.w) {
+        return;
+    }
+    // The top left pixel of its 2x2: the lit pass traces itself where its pixel is not on the same surface.
+    ivec2 p = min(q * 2, Size.xy - 1);
+    CameraBlockPos = Base.xyz;
+    float z = texelFetch(Depth, p, 0).r;
+    // Reversed depth: cleared to 0, the sky.
+    if (z <= 0.0) {
+        imageStore(Mask, q, vec4(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    vec3 P = cursed_point(p, z);
+    // Its surface's normal from the neighbours on the side that continues it (not across an edge).
+    vec3 dx, dy;
+    {
+        float zl = texelFetch(Depth, clamp(p - ivec2(1, 0), ivec2(0), Size.xy - 1), 0).r;
+        float zr = texelFetch(Depth, clamp(p + ivec2(1, 0), ivec2(0), Size.xy - 1), 0).r;
+        float zd = texelFetch(Depth, clamp(p - ivec2(0, 1), ivec2(0), Size.xy - 1), 0).r;
+        float zu = texelFetch(Depth, clamp(p + ivec2(0, 1), ivec2(0), Size.xy - 1), 0).r;
+        bool right = zr > 0.0 && (zl <= 0.0 || abs(zr - z) < abs(z - zl));
+        bool up = zu > 0.0 && (zd <= 0.0 || abs(zu - z) < abs(z - zd));
+        dx = right ? cursed_point(p + ivec2(1, 0), zr) - P : P - cursed_point(p - ivec2(1, 0), zl);
+        dy = up ? cursed_point(p + ivec2(0, 1), zu) - P : P - cursed_point(p - ivec2(0, 1), zd);
+    }
+    vec3 n = normalize(cross(dx, dy));
+    if (dot(n, P) > 0.0) {
+        n = -n;
+    }
+    vec3 L = CursedSun.w > 0.02 ? CursedSun.xyz : CursedMoon.xyz;
+    if (dot(n, L) <= 0.0) {
+        // Leaves and plants let the sun through to their far side (terrain.fsh does the same).
+        if (!cursed_lets_through(ivec3(floor(P + Frac.xyz - n * 0.05)) + Base.xyz)) {
+            imageStore(Mask, q, vec4(0.0, z, 0.0, 0.0));
+            return;
+        }
+        n = -n;
+    }
+    vec3 o = P + Frac.xyz + n * 0.02;
+    ivec3 cell = ivec3(floor(o)) + Base.xyz;
+    if (!cursed_inside(cell) || ((cursed_voxel(cell) >> 4) & 15u) == 0u) {
+        // Outside the window or where no sky reaches: the terrain pass does not ask.
+        imageStore(Mask, q, vec4(1.0, z, 0.0, 0.0));
+        return;
+    }
+    float maxT = mix(160.0, 48.0, smoothstep(32.0, 112.0, length(P)));
+    vec3 soft = cursed_soft(L, uvec3(uint(q.x), uint(q.y), uint(CursedSpare.x)));
+    imageStore(Mask, q, vec4(cursed_trace(o, soft, maxT) * cursed_entity_shadow(o, soft), z, 0.0, 0.0));
+}

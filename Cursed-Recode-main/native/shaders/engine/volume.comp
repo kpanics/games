@@ -1,0 +1,112 @@
+#version 450
+// Light in the air (engine/upscale.rs): for every other pixel of the small picture, a walk along the line of sight
+// through the sun's reach (sunvis.comp), adding what the air scatters toward the eye where the sun reaches it — rays
+// through leaves and windows, a glow round the sun — and how much of what lies behind still comes through. The walk
+// starts at a different place each frame; the frames put together smooth it (taa.comp adds it in).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D Depth;
+layout(set = 0, binding = 1) uniform sampler3D SunVis;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D Out;
+layout(std140, set = 0, binding = 3) uniform CursedEngine {
+    ivec4 CursedWindow;
+    ivec4 CursedSize;
+    vec4 CursedSun;
+    vec4 CursedSunColor;
+    vec4 CursedMoon;
+    vec4 CursedSky;
+    vec4 CursedTime;
+    vec4 CursedSpare;
+    ivec4 CursedColumns[64];
+};
+
+layout(push_constant) uniform Walk {
+    // Clip space back to round the camera (the frame as drawn).
+    mat4 InvViewProj;
+    // The camera's block (xyz), the frame's number (w).
+    ivec4 Base;
+    // The camera from its block.
+    vec4 Frac;
+    // The small picture's width, height; this image's width, height.
+    ivec4 Sizes;
+};
+
+const vec3 GRID = vec3(128.0, 64.0, 128.0);
+const int STEPS = 12;
+const float PI = 3.14159265;
+
+float hash(uvec3 v) {
+    uint h = v.x * 73856093u ^ v.y * 19349663u ^ v.z * 83492791u;
+    h ^= h >> 13;
+    h *= 0x5bd1e995u;
+    h ^= h >> 15;
+    return float(h & 0xFFFFu) / 65535.0;
+}
+
+// Henyey-Greenstein: how much light scatters by the angle (cosine mu) between the sun and the line of sight.
+float phase(float mu, float g) {
+    float d = 1.0 + g * g - 2.0 * g * mu;
+    return (1.0 - g * g) / (4.0 * PI * d * sqrt(d));
+}
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= Sizes.z || q.y >= Sizes.w) {
+        return;
+    }
+    ivec2 p = min(q * 2, Sizes.xy - 1);
+    float z = texelFetch(Depth, p, 0).r;
+    vec2 ndc = (vec2(p) + 1.0) / vec2(Sizes.xy) * 2.0 - 1.0;
+    // Reversed depth: 0 is the sky, as far as the walk goes.
+    vec4 wp = InvViewProj * vec4(ndc, max(z, 1e-6), 1.0);
+    vec3 P = wp.xyz / wp.w;
+    float dist = z <= 0.0 ? 64.0 : length(P);
+    vec3 dir = normalize(P);
+    float reach = min(dist, 64.0);
+
+    bool day = CursedSun.w > 0.02;
+    vec3 L = day ? CursedSun.xyz : CursedMoon.xyz;
+    float strength = day ? CursedSun.w : CursedMoon.w * 0.35;
+    // Thicker air in the morning and the evening, and in rain.
+    float noon = smoothstep(0.0, 0.5, L.y);
+    float density = 0.003 * (1.0 + 2.2 * (1.0 - noon)) * (1.0 + 2.5 * CursedSky.a);
+    float mu = dot(dir, L);
+    // Mostly forward, toward the sun: the air is not milky all round, it glows where the light comes from.
+    float ph = phase(mu, 0.76) * 0.94 + 0.06 / (4.0 * PI);
+
+    // Morning mist: low over the water and in the hollows (thinning above the sea's level), from before dawn until the
+    // sun is well up, a little in the rain too.
+    float clock = mod(CursedTime.x + 1500.0, 24000.0);
+    float morning = smoothstep(0.0, 1200.0, clock) * (1.0 - smoothstep(3200.0, 6000.0, clock));
+    float mist = 0.045 * morning + 0.015 * CursedSky.a;
+    float eyeY = float(Base.y) + Frac.y;
+
+    float jitter = hash(uvec3(uint(q.x), uint(q.y), uint(Base.w)));
+    float stepLength = reach / float(STEPS);
+    float through = 1.0;
+    float scattered = 0.0;
+    float misty = 0.0;
+    vec3 gridAt = vec3(Base.xyz & ivec3(127, 63, 127)) + Frac.xyz;
+    for (int i = 0; i < STEPS; i++) {
+        float t = (float(i) + jitter) * stepLength;
+        vec3 at = dir * t;
+        // Above and below the grid the air is taken as open to the sun.
+        float vis = abs(at.y) < 31.0 ? textureLod(SunVis, (gridAt + at) / GRID, 0.0).r : 1.0;
+        float m = mist > 0.0 ? mist * exp(-max(eyeY + at.y - 63.0, 0.0) / 5.0) : 0.0;
+        scattered += through * vis * (density + m) * stepLength;
+        misty += through * m * stepLength;
+        through *= exp(-(density + m) * stepLength);
+    }
+    // Kept to a veil: the eye's own glare is not drawn here.
+    vec3 light = min(CursedSunColor.rgb * strength * ph * scattered * 1.1, vec3(0.35));
+    // Distance thins into the sky's colour, not into grey (and the sky itself stays as it is); the mist is paler, lit
+    // by the whole sky.
+    if (z > 0.0) {
+        light += CursedSky.rgb * (1.0 - through) * 0.45 * max(CursedSun.w, 0.15);
+        light += mix(CursedSky.rgb, vec3(0.92, 0.94, 0.97), 0.6) * misty * 0.5 * max(CursedSun.w, 0.25);
+    } else {
+        through = 1.0;
+    }
+    imageStore(Out, q, vec4(light, through));
+}

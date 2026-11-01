@@ -1,0 +1,11 @@
+{
+  "cursed.options.engine": "Графика Cursed",
+  "cursed.options.engine.off": "Выкл",
+  "cursed.options.engine.low": "Низкая",
+  "cursed.options.engine.medium": "Средняя",
+  "cursed.options.engine.high": "Высокая",
+  "cursed.options.engine.ultra": "Ультра",
+  "cursed.options.engine.tooltip": "Низкая: цветной свет и свечение, мир рисуется меньше ради FPS. Средняя: + тени, отражения, живая вода. Высокая и Ультра: + мягкие тени и свет в воздухе.",
+  "cursed.options.worldScale": "Разрешение мира",
+  "cursed.options.worldScale.tooltip": "Мир рисуется в меньшем разрешении и собирается из нескольких кадров: больше FPS, интерфейс остаётся чётким."
+}

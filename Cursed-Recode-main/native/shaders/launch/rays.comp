@@ -1,0 +1,24 @@
+// Rays from the light through clouds, ridges and haze: a quarter of the size, many taps, spread back up softly.
+// The taps' start is shifted per texel by a fixed hash: no bands, and nothing that flickers.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D uSrc;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D Rays;
+layout(push_constant) uniform Step {
+    vec4 Info;     // size, the light (picture uv, y down)
+    vec4 More;     // its radius (of the height)
+};
+void main(){
+  ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+  if (q.x >= int(Info.x) || q.y >= int(Info.y)) return;
+  vec2 uv = (vec2(q) + .5) / Info.xy;
+  float ar = Info.x / Info.y;
+  vec2 dir = (Info.zw - uv) / 96.;
+  vec2 p = uv + dir * hq(vec2(q), 5.);
+  float dec = 1.; vec3 acc = vec3(0.);
+  for (int i = 0; i < 96; i++) {
+    float near = smoothstep(More.x * 3.4, More.x * .35, length((p - Info.zw) * vec2(ar, 1.)));
+    acc += textureLod(uSrc, p, 0.).rgb * dec * near;
+    p += dir; dec *= .985;
+  }
+  imageStore(Rays, q, vec4(acc * (2.6 / 96.), 1.));
+}

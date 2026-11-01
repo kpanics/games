@@ -1,0 +1,109 @@
+// The window's title bar: near black, her icon and the name in the menu's own letters (distance fields,
+// tools/text_atlas.py), the caption buttons drawn as thin lines. Under the cursor a button lights a little and a line is
+// drawn in under it, white, as everything of the client (no fire: 14.10, her word). The same bar in the window before
+// the game (still) and on the game's window (live).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D Atlas;
+layout(set = 0, binding = 2) uniform sampler2D IconT;
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D Out;
+layout(set = 0, binding = 4, std430) readonly buffer Glyphs {
+    // per glyph: its box (x0 y0 x1 y1, px, y down), its field in the atlas (x0 y0 x1 y1, atlas px), colour rgb, alpha
+    vec4 G[];
+};
+
+float seg(vec2 p, vec2 a, vec2 b){ vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0., 1.); return length(pa - ba * h); }
+// the distance to a rounded box's outline
+float outline(vec2 p, vec2 c, vec2 h, float r){ vec2 q = abs(p - c) - h + r; return abs(length(max(q, 0.)) + min(max(q.x, q.y), 0.) - r); }
+// a line `w` px wide `d` px away: how much of the pixel it covers
+float ink(float d, float w){ return clamp(w * .5 - d + .5, 0., 1.); }
+
+void main(){
+  ivec2 ip = ivec2(gl_GlobalInvocationID.xy);
+  if (ip.x >= int(Size.x) || ip.y >= int(Size.y)) return;
+  vec2 p0 = vec2(ip) + .5;
+  float W = Size.x, H = Size.y, s = Size.z, t = Size.w, act = State.x;
+  float dim = mix(.5, 1., act);
+  float bw = State.w, lw = max(1., s);
+  // the bar comes down into its place as the window before the game lets go of the game's — that window has none (her
+  // word, 19.10) —, its buttons with it; above it as it comes, the black that window was
+  float kd = clamp(Pill.x, 0., 1.);
+  kd = kd * kd * (3. - 2. * kd);
+  vec2 p = p0 + vec2(0., (1. - kd) * H);
+  vec3 col = vec3(0.);
+  if (p.y < H) {
+    col = mix(vec3(.074), vec3(.056), p.y / H);
+
+    // her icon
+    vec2 iu = (p - Icon.xy) / max(Icon.z, 1.);
+    if (iu.x >= 0. && iu.y >= 0. && iu.x < 1. && iu.y < 1.) {
+      vec4 ic = textureLod(IconT, iu, 0.);   // premultiplied
+      col = col * (1. - ic.a * Icon.w) + ic.rgb * mix(.6, 1., act) * Icon.w;
+    }
+
+    // the name (and where the game is)
+    int n = int(State.z);
+    float cov = 0.;
+    vec3 tc = vec3(0.);
+    for (int i = 0; i < n; i++) {
+      vec4 q = G[i * 3], a = G[i * 3 + 1], c = G[i * 3 + 2];
+      if (p.x < q.x || p.x > q.z || p.y < q.y || p.y > q.w) continue;
+      float k = (q.w - q.y) / max(a.w - a.y, 1.);          // px per atlas px
+      float v = textureLod(Atlas, (a.xy + (p - q.xy) / k) / Field.yz, 0.).r;
+      float d = (v * 255. - 128.) / 127. * Field.x;     // atlas px, + inside
+      float cv = clamp(.5 + d * k, 0., 1.) * c.a;
+      if (cv > cov) { cov = cv; tc = c.rgb; }
+    }
+    col = mix(col, tc * dim, cov);
+
+    // the caption buttons from the right: close, maximise, minimise
+    for (int b = 0; b < 3; b++) {
+      float x1 = W - float(b) * bw, x0 = x1 - bw;
+      if (p.x < x0 || p.x >= x1) continue;
+      int which = 2 - b;
+      float hv = Hover[which], pr = Press[which];
+      vec2 c = vec2(floor((x0 + x1) * .5) + .5, floor(H * .5) + .5);
+      float g = 5. * s;
+      float d;
+      if (which == 0) {
+        d = seg(p, c + vec2(-g, 0.), c + vec2(g, 0.));
+      } else if (which == 1) {
+        if (State.y > .5) {
+          // restore: the front square, and of the one behind it only what shows
+          vec2 cf = c + vec2(-1., 1.) * s, cb = c + vec2(1., -1.) * s;
+          float hf = g - s;
+          bool inFront = all(lessThan(abs(p - cf), vec2(hf + lw * .5)));
+          d = min(outline(p, cf, vec2(hf), s), inFront ? 1e9 : outline(p, cb, vec2(hf), s));
+        } else {
+          d = outline(p, c, vec2(g), s);
+        }
+      } else {
+        d = min(seg(p, c + vec2(-g, -g), c + vec2(g, g)), seg(p, c + vec2(-g, g), c + vec2(g, -g)));
+      }
+      float glyph = ink(d, lw);
+      // lit a little under the cursor (close a little more: it is the one that ends everything), a little darker held down
+      col += vec3(which == 2 ? .09 : .065) * hv - vec3(.025) * pr;
+      // the line under it: drawn in from the left, gone to the right, a soft glow round it
+      float lp = Lines[which];
+      float u = (p.x - (c.x - 8. * s)) / (16. * s);
+      float on = lp > 0. && u >= max(lp - 1., 0.) && u < min(lp, 1.) ? 1. : 0.;
+      float ld = abs(p.y - (c.y + 9. * s));
+      col += on * (vec3(.82) * ink(ld, lw) + vec3(.22) * exp(-ld * ld / (6. * s * s)) * .5);
+      col = mix(col, vec3(.86 + .14 * hv) * dim, glyph);
+    }
+  }
+
+  // the window before the game's own minimise (her word, 19.10): a thin white dash on its black, top right, no cell
+  // round it; it comes down when the cursor nears the top and goes back up when it leaves; under the cursor a soft glow
+  // round it, and it draws out a little longer
+  float pk = Pill.y;
+  if (pk > 0.) {
+    float k = pk * pk * (3. - 2. * pk);
+    vec2 c = vec2(floor(W - bw * .5) + .5, floor(H * .5) + .5 - (1. - k) * H * .5);
+    float hv = Pill.z;
+    float hl = (5. + 2.5 * hv) * s;
+    float d = seg(p0, c - vec2(hl, 0.), c + vec2(hl, 0.));
+    col += vec3(exp(-d * d / (40. * s * s)) * .2 + exp(-d / (10. * s)) * .05) * hv * k;
+    col = mix(col, vec3(.78 + .22 * hv), ink(d, lw) * k);
+  }
+  imageStore(Out, ip, vec4(clamp(col, 0., 1.), 1.));
+}

@@ -1,0 +1,605 @@
+#version 450
+// Chams' curse in the air (engine/curse.rs, the menu's Look "Cursed"): its ash. The body is its model's boxes
+// (cursed.recode.chams.ChamsLiquid gives each cube where its pose is this frame, and the light on it); the body itself
+// the game draws (chams.glsl ch_cursed). Flakes come off the body's surface (each place as likely as it is large; more
+// as the body moves), smouldering at their edges as they flutter down, the burning creeping into them; on the ground
+// they lie cold and melt away, in the air the burnt through crumble into dust.
+// Stage 0: the flakes (and their dust let go). Stage 1: the dust. Stage 2: each flake and speck into the lists of the
+// screen's tiles (16 by 16 pixels) it covers. Stage 3: each pixel, what of them covers it (the flakes as thin plates,
+// the dust as specks; their edges as much of a pixel as they cover), the nearest over the rest, laid over the frame's
+// copy.
+
+layout(local_size_x = 64, local_size_y = 1) in;
+
+struct Flake {
+    // where (blocks from the anchor), w its size (its middle to its edge; 0 none)
+    vec4 pos;
+    // how fast (blocks a second), w its age (s)
+    vec4 vel;
+    // which way it is turned (a quaternion)
+    vec4 rot;
+    // x when it lands at the latest (its age), y what it does (0 flying, 1 lying, 2 crumbling), z its own number,
+    // w the light on it
+    vec4 info;
+    // how fast it turns (radians a second, round each axis), w how far it has burnt (0..1)
+    vec4 spin;
+};
+
+struct Speck {
+    // where, w its size (0 none)
+    vec4 pos;
+    // how fast, w its age
+    vec4 vel;
+    // x how long it lasts, y the light on it, z its own number, w how hot it still is
+    vec4 info;
+};
+
+layout(std430, set = 0, binding = 0) buffer Flakes {
+    Flake flakes[];
+};
+layout(std430, set = 0, binding = 1) buffer Specks {
+    Speck dust[];
+};
+// the specks let go: how many ever (their ring goes round)
+layout(std430, set = 0, binding = 2) buffer Counters {
+    uint counters[];
+};
+// each tile's count, then each tile's list (PER_TILE long)
+layout(std430, set = 0, binding = 3) buffer Tiles {
+    uint tiles[];
+};
+layout(set = 0, binding = 4, rgba8) uniform image2D Canvas;
+layout(set = 0, binding = 5) uniform sampler2D Depth;
+layout(set = 0, binding = 6) uniform usampler2DArray CursedVoxels;
+layout(std140, set = 0, binding = 7) uniform U {
+    mat4 ViewProj;
+    mat4 InvViewProj;
+    // the camera from the anchor (blocks), the step (s)
+    vec4 Cam;
+    // x seconds, y how many boxes, z the frame's width, w its height
+    vec4 Info;
+    // how far the anchor moved this step (blocks), w the quality (0 low .. 3 ultra)
+    vec4 Shift;
+    // the anchor (a block of the world)
+    ivec4 Anchor;
+    // the voxel window: its lowest block (xyz), its width (w); its height (x of WindowSize), whether there is one (y)
+    ivec4 Window;
+    ivec4 WindowSize;
+    // the sun (its direction, how much of it), its colour (w: how much of the day it is, 0..1)
+    vec4 Sun;
+    vec4 SunColor;
+    vec4 Sky;
+    vec4 Horizon;
+    // x the first of the body's flakes let go this frame (in their ring), y how many, z their size, w how much they
+    // smoulder (1 each as made)
+    vec4 Ash1;
+    // x the ash on (1), y crumbling into dust (1), z how long it lies on the ground (s), w how much ash (1 as made)
+    vec4 Ash2;
+    vec4 AshCol;
+    vec4 EmberCol;
+    // the boxes: middle (xyz from the camera, w its body), three half-sides (w of the first the block light on the
+    // body, of the second the sky's, 0..1, of the third the boxes' surface up to and with this one, 0..1)
+    vec4 Boxes[512];
+};
+layout(push_constant) uniform P {
+    int Stage;
+};
+
+const uint MOST_BOXES = 128u;
+const uint MOST_FLAKES = 1536u;
+const uint MOST_DUST = 2048u;
+const uint PRIMS = MOST_FLAKES + MOST_DUST;
+const uint TILE = 16u;
+// a tile's list; one that would hold more takes all of them instead (nothing left out, nothing flickering)
+const uint PER_TILE = 384u;
+// past this far (blocks) nothing of it is drawn: it is less than a pixel there
+const float FARTHEST = 32.0;
+
+// ---- the numbers of chance ----
+uint hash_u(uint n) {
+    n ^= n >> 16;
+    n *= 0x7feb352du;
+    n ^= n >> 15;
+    n *= 0x846ca68bu;
+    n ^= n >> 16;
+    return n;
+}
+
+float hash1(uint n) {
+    return float(hash_u(n) & 0xffffffu) / 16777216.0;
+}
+
+vec3 hash3(uint n) {
+    return vec3(hash1(n), hash1(n ^ 0x9e3779b9u), hash1(n ^ 0x85ebca6bu));
+}
+
+float vnoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    ivec3 b = ivec3(i);
+    float n[8];
+    for (int k = 0; k < 8; k++) {
+        ivec3 o = b + ivec3(k & 1, (k >> 1) & 1, k >> 2);
+        n[k] = hash1(uint(o.x) * 73856093u ^ uint(o.y) * 19349663u ^ uint(o.z) * 83492791u);
+    }
+    return mix(mix(mix(n[0], n[1], u.x), mix(n[2], n[3], u.x), u.y), mix(mix(n[4], n[5], u.x), mix(n[6], n[7], u.x), u.y), u.z);
+}
+
+// A flow through the air, -1..1 each way (three noises apart).
+vec3 flow(vec3 p) {
+    return vec3(vnoise(p), vnoise(p + vec3(31.7, 7.3, 11.1)), vnoise(p + vec3(-13.9, 41.3, 23.7))) * 2.0 - 1.0;
+}
+
+vec3 qrot(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+// A turn of chance, all ways alike.
+vec4 q_any(uint seed) {
+    vec3 u = hash3(seed);
+    float a = sqrt(1.0 - u.x);
+    float b = sqrt(u.x);
+    return vec4(a * sin(6.2831853 * u.y), a * cos(6.2831853 * u.y), b * sin(6.2831853 * u.z), b * cos(6.2831853 * u.z));
+}
+
+// ---- the body ----
+vec3 box_mid(uint i) {
+    return Boxes[i * 4u].xyz + Cam.xyz;
+}
+
+// The light on a box's body (0..1): the block's, or the sky's as much as it is day.
+float box_light(uint i) {
+    return max(Boxes[i * 4u + 1u].w, Boxes[i * 4u + 2u].w * mix(0.16, 1.0, SunColor.w));
+}
+
+// A face's way out along the half-side `a` (its side `s`): along it, or, the box flat that way (a wing, a fin), across
+// its other two.
+vec3 face_out(vec3 a, vec3 b, vec3 c, float s) {
+    vec3 n = dot(a, a) > 1e-12 ? a : cross(b, c);
+    return dot(n, n) > 1e-12 ? normalize(n) * (s < 0.0 ? -1.0 : 1.0) : vec3(0.0, 1.0, 0.0);
+}
+
+// A place on a box (`r` on its half-sides, one of them +-1: its face) and that face's way out.
+vec3 on_box(uint i, vec3 r, out vec3 n) {
+    vec3 ax = Boxes[i * 4u + 1u].xyz;
+    vec3 ay = Boxes[i * 4u + 2u].xyz;
+    vec3 az = Boxes[i * 4u + 3u].xyz;
+    vec3 a = abs(r);
+    n = a.x >= a.y && a.x >= a.z ? face_out(ax, ay, az, r.x) : a.y >= a.z ? face_out(ay, az, ax, r.y) : face_out(az, ax, ay, r.z);
+    return box_mid(i) + ax * r.x + ay * r.y + az * r.z;
+}
+
+// A box by chance, each as likely as its surface is large (the boxes' surface so far, Rust's): an arrow's or a
+// wing's few, a body's trunk much.
+uint some_box(uint seed, uint n) {
+    float u = hash1(seed);
+    for (uint i = 0u; i < n; i++) {
+        if (u <= Boxes[i * 4u + 3u].w) {
+            return i;
+        }
+    }
+    return n - 1u;
+}
+
+// A place of chance on a box's surface (on its half-sides: one of them +-1), each face as likely as it is large.
+vec3 some_face(uint b, uint seed) {
+    vec3 ax = Boxes[b * 4u + 1u].xyz;
+    vec3 ay = Boxes[b * 4u + 2u].xyz;
+    vec3 az = Boxes[b * 4u + 3u].xyz;
+    vec3 area = vec3(length(cross(ay, az)), length(cross(az, ax)), length(cross(ax, ay)));
+    float pick = hash1(seed) * (area.x + area.y + area.z);
+    vec3 r = hash3(seed + 101u) * 2.0 - 1.0;
+    float side = hash1(seed + 211u) < 0.5 ? -1.0 : 1.0;
+    if (pick < area.x) {
+        r.x = side;
+    } else if (pick < area.x + area.y) {
+        r.y = side;
+    } else {
+        r.z = side;
+    }
+    return r;
+}
+
+// ---- the world ----
+// Whether a place (blocks from the anchor) is in a block a flake lies on (the engine's voxel window; outside it, not),
+// and the top of that block there.
+bool solid_at(vec3 p, out float top) {
+    top = 0.0;
+    if (WindowSize.y == 0) {
+        return false;
+    }
+    vec3 w = vec3(Anchor.xyz) + p;
+    ivec3 b = ivec3(floor(w));
+    ivec3 r = b - Window.xyz;
+    if (r.x < 0 || r.z < 0 || r.y < 0 || r.x >= Window.w || r.z >= Window.w || r.y >= WindowSize.x) {
+        return false;
+    }
+    uint v = texelFetch(CursedVoxels, ivec3(b.x & 255, b.z & 255, b.y - Window.y), 0).r & 15u;
+    float fy = w.y - float(b.y);
+    float y0 = float(b.y - Anchor.y);
+    if (v == 1u || v == 5u || v == 8u || v == 11u) {
+        top = y0 + 1.0;
+        return true;
+    }
+    if (v == 2u && fy < 0.5) {
+        top = y0 + 0.5;
+        return true;
+    }
+    if (v == 3u && fy >= 0.5) {
+        top = y0 + 1.0;
+        return true;
+    }
+    return false;
+}
+
+// ---- letting ash go ----
+void let_dust(vec3 p, vec3 v, float light, float heat, uint seed) {
+    if (Ash2.y < 0.5) {
+        return;
+    }
+    uint i = atomicAdd(counters[0], 1u) % MOST_DUST;
+    vec3 h = hash3(seed);
+    Speck s;
+    s.pos = vec4(p + (h - 0.5) * 0.02, mix(0.0012, 0.003, h.x) * mix(0.8, 1.25, Ash1.z));
+    s.vel = vec4(v * 0.5 + (hash3(seed + 17u) - 0.5) * 0.16 + vec3(0.0, 0.04, 0.0), 0.0);
+    s.info = vec4(mix(1.0, 2.6, h.y), light, float(seed & 0xffffu), heat);
+    dust[i] = s;
+}
+
+void let_flake(uint i, vec3 p, vec3 v, float light, uint seed, float burnt) {
+    vec3 h = hash3(seed);
+    Flake f;
+    f.pos = vec4(p, mix(0.011, 0.034, pow(h.x, 1.6)) * Ash1.z);
+    f.vel = vec4(v, 0.0);
+    f.rot = q_any(seed + 29u);
+    f.info = vec4(mix(3.0, 7.0, h.y), 0.0, float(seed & 0xffffu), light);
+    f.spin = vec4((hash3(seed + 41u) - 0.5) * 7.0, burnt);
+    flakes[i] = f;
+}
+
+// ---- stage 0: the flakes ----
+void step_flake(uint i) {
+    Flake f = flakes[i];
+    float dt = Cam.w;
+    float t = Info.x;
+    uint nb = min(uint(Info.y), MOST_BOXES);
+    f.pos.xyz -= Shift.xyz;
+    // one of the body's let go this frame: off a place of chance on its surface
+    uint start = uint(Ash1.x);
+    uint count = uint(Ash1.y);
+    if (count > 0u && nb > 0u && (i + MOST_FLAKES - start) % MOST_FLAKES < count) {
+        uint seed = hash_u(i * 9781u + uint(t * 1000.0) * 6271u);
+        uint b = some_box(seed, nb);
+        vec3 n;
+        vec3 p = on_box(b, some_face(b, seed + 1u), n);
+        vec3 h = hash3(seed + 3u);
+        let_flake(i, p + n * 0.012, n * mix(0.05, 0.3, h.x) + vec3(0.0, 0.12, 0.0), box_light(b), seed + 5u, h.y * 0.25);
+        return;
+    }
+    if (f.pos.w <= 0.0) {
+        return;
+    }
+    uint seed = uint(f.info.z) * 2654435761u + i;
+    float h = hash1(seed);
+    f.vel.w += dt;
+    float age = f.vel.w;
+    if (f.info.y < 0.5) {
+        // fluttering down: as flat as it lies to the fall, the slower; a sway of its own; the air's flow
+        vec3 up = qrot(f.rot, vec3(0.0, 1.0, 0.0));
+        float flat_ = abs(up.y);
+        vec3 want = vec3(0.0, -(0.2 + 0.22 * h) * mix(1.7, 0.7, flat_), 0.0);
+        want += flow(f.pos.xyz * 1.3 + vec3(0.0, t * 0.35, t * 0.2)) * 0.32;
+        want += vec3(cos(age * 2.1 + h * 6.28), 0.0, sin(age * 1.7 + h * 9.1)) * 0.2 * flat_;
+        f.vel.xyz = mix(f.vel.xyz, want, 1.0 - exp(-dt * 2.4));
+        f.pos.xyz += f.vel.xyz * dt;
+        f.spin.xyz += (hash3(seed + uint(age * 7.0)) - 0.5) * 9.0 * dt;
+        f.spin.xyz *= exp(-dt * 0.4);
+        f.spin.xyz = clamp(f.spin.xyz, vec3(-7.0), vec3(7.0));
+        f.rot = normalize(f.rot + 0.5 * dt * vec4(f.spin.xyz * f.rot.w + cross(f.spin.xyz, f.rot.xyz), -dot(f.spin.xyz, f.rot.xyz)));
+        // the burning creeps in from its edges
+        f.spin.w += dt * (0.07 + 0.08 * h) * mix(0.5, 1.4, Ash1.w * 0.5 + 0.25);
+        float top;
+        if (solid_at(f.pos.xyz, top)) {
+            // landed: it lies on the block, cold soon
+            f.pos.y = top + 0.003;
+            f.info.y = 1.0;
+            f.info.x = age;
+            f.vel.xyz = vec3(0.0);
+        } else if (f.spin.w >= 1.0 || age > f.info.x + 5.0) {
+            // burnt through in the air: it crumbles into dust
+            f.info.y = 2.0;
+            f.info.x = age;
+            for (uint k = 0u; k < 5u; k++) {
+                let_dust(f.pos.xyz, f.vel.xyz, f.info.w, 1.0, seed + k * 13u + uint(t * 50.0));
+            }
+        }
+    } else if (f.info.y < 1.5) {
+        // lying: turned flat to the ground (a turn of its own round the up), cold, then melting away
+        float yaw = h * 6.2831853;
+        vec4 flat_q = vec4(0.0, sin(yaw * 0.5), 0.0, cos(yaw * 0.5));
+        if (dot(flat_q, f.rot) < 0.0) {
+            flat_q = -flat_q;
+        }
+        f.rot = normalize(mix(f.rot, flat_q, 1.0 - exp(-dt * 10.0)));
+        float lying = age - f.info.x;
+        if (lying > Ash2.z + 2.5) {
+            f.pos.w = 0.0;
+        }
+    } else if (age - f.info.x > 0.35) {
+        f.pos.w = 0.0;
+    }
+    flakes[i] = f;
+}
+
+// ---- stage 1: the dust ----
+void step_speck(uint i) {
+    Speck s = dust[i];
+    // (one let go this frame, off a flake, is from the anchor as it is now already)
+    if (s.vel.w > 0.0) {
+        s.pos.xyz -= Shift.xyz;
+    }
+    if (s.pos.w <= 0.0) {
+        dust[i] = s;
+        return;
+    }
+    float dt = Cam.w;
+    s.vel.w += dt;
+    vec3 want = vec3(0.0, -0.05, 0.0) + flow(s.pos.xyz * 2.1 + Info.x * 0.5) * 0.16;
+    s.vel.xyz = mix(s.vel.xyz, want, 1.0 - exp(-dt * 1.6));
+    s.pos.xyz += s.vel.xyz * dt;
+    s.info.w = max(s.info.w - dt * 1.4, 0.0);
+    float top;
+    if (s.vel.w > s.info.x || solid_at(s.pos.xyz, top)) {
+        s.pos.w = 0.0;
+    }
+    dust[i] = s;
+}
+
+// ---- stage 2: into the tiles ----
+// The rectangle (pixels) a sphere covers: x0 y0 x1 y1 (x0 > x1: none).
+vec4 screen_rect(vec3 c, float r) {
+    vec4 ndc = ViewProj * vec4(c, 1.0);
+    if (ndc.w < r + 0.05) {
+        // behind the camera altogether: nowhere on the screen; across its plane (round the camera): all of it
+        return ndc.w < -r ? vec4(1.0, 1.0, 0.0, 0.0) : vec4(0.0, 0.0, Info.z, Info.w);
+    }
+    vec2 s = ndc.xy / ndc.w;
+    float k = max(length(ViewProj[0].xyz), length(ViewProj[1].xyz));
+    float rr = r * k / ndc.w;
+    vec2 lo = (s - rr) * 0.5 + 0.5;
+    vec2 hi = (s + rr) * 0.5 + 0.5;
+    // a pixel and a half more each way: the edges' smoothing
+    return vec4(lo * Info.zw - 1.5, hi * Info.zw + 1.5);
+}
+
+void bin(uint prim) {
+    vec3 c;
+    float r;
+    if (prim < MOST_FLAKES) {
+        Flake f = flakes[prim];
+        if (f.pos.w <= 0.0) {
+            return;
+        }
+        c = f.pos.xyz - Cam.xyz;
+        r = f.pos.w;
+    } else {
+        Speck s = dust[prim - MOST_FLAKES];
+        if (s.pos.w <= 0.0) {
+            return;
+        }
+        c = s.pos.xyz - Cam.xyz;
+        r = s.pos.w;
+    }
+    // past FARTHEST it is less than a pixel
+    if (length(c) > FARTHEST) {
+        return;
+    }
+    vec4 rect = screen_rect(c, r);
+    if (rect.x > rect.z) {
+        return;
+    }
+    rect = vec4(max(rect.xy, vec2(0.0)), min(rect.zw, Info.zw - 1.0));
+    if (rect.x > rect.z || rect.y > rect.w) {
+        return;
+    }
+    uint tx = (uint(Info.z) + TILE - 1u) / TILE;
+    uint ty = (uint(Info.w) + TILE - 1u) / TILE;
+    uvec2 lo = uvec2(rect.xy) / TILE;
+    uvec2 hi = min(uvec2(rect.zw) / TILE, uvec2(tx - 1u, ty - 1u));
+    uint n_tiles = tx * ty;
+    for (uint y = lo.y; y <= hi.y; y++) {
+        for (uint x = lo.x; x <= hi.x; x++) {
+            uint tile = y * tx + x;
+            uint at = atomicAdd(tiles[tile], 1u);
+            if (at < PER_TILE) {
+                tiles[n_tiles + tile * PER_TILE + at] = prim;
+            }
+        }
+    }
+}
+
+// ---- stage 3: the pixels ----
+vec3 to_linear(vec3 c) {
+    return pow(c, vec3(2.2));
+}
+
+vec3 to_srgb(vec3 c) {
+    return pow(max(c, 0.0), vec3(1.0 / 2.2));
+}
+
+// The light the world gives what is there (0..1 as the game's: the body's when it was let go) as a brightness.
+float lit(float l) {
+    return mix(0.07, 1.0, l * l);
+}
+
+// A flake along the ray: a thin plate, ragged round its edge, burnt into from it, its burning edge glowing.
+vec4 flake_at(uint i, vec3 rd, float pa, float far, out float hit_t) {
+    hit_t = 1e9;
+    Flake f = flakes[i];
+    if (f.pos.w <= 0.0) {
+        return vec4(0.0);
+    }
+    vec3 c = f.pos.xyz - Cam.xyz;
+    vec3 n = qrot(f.rot, vec3(0.0, 1.0, 0.0));
+    float den = dot(rd, n);
+    if (abs(den) < 0.015) {
+        return vec4(0.0);
+    }
+    float t = dot(c, n) / den;
+    if (t <= 0.02 || t > far + 0.012) {
+        return vec4(0.0);
+    }
+    float size = f.pos.w;
+    float age = f.vel.w;
+    float lying = f.info.y > 0.5 && f.info.y < 1.5 ? age - f.info.x : 0.0;
+    float melt = f.info.y > 0.5 && f.info.y < 1.5 ? smoothstep(Ash2.z, Ash2.z + 2.5, lying) : 0.0;
+    size *= 1.0 - 0.35 * melt;
+    vec3 hp = rd * t - c;
+    vec2 uv = vec2(dot(hp, qrot(f.rot, vec3(1.0, 0.0, 0.0))), dot(hp, qrot(f.rot, vec3(0.0, 0.0, 1.0)))) / size;
+    float rad = length(uv);
+    if (rad > 1.2) {
+        return vec4(0.0);
+    }
+    uint seed = uint(f.info.z) * 2654435761u + i;
+    vec4 ph = vec4(hash1(seed + 1u), hash1(seed + 2u), hash1(seed + 3u), hash1(seed + 4u)) * 6.2831853;
+    float ang = atan(uv.y, uv.x);
+    float outline = 0.7 + 0.13 * sin(3.0 * ang + ph.x) + 0.08 * sin(5.0 * ang + ph.y) + 0.05 * sin(9.0 * ang + ph.z) + 0.035 * sin(17.0 * ang + ph.w);
+    float pu = pa * t / (size * max(abs(den), 0.2));
+    float body = clamp((outline - rad) / pu + 0.5, 0.0, 1.0);
+    // burnt in from its edge, raggedly; the ash where it burnt is gone
+    float burn = f.spin.w + (f.info.y > 1.5 ? (age - f.info.x) / 0.35 : 0.0) + melt;
+    float field = rad / outline * 0.72 + vnoise(vec3(uv * 3.3, float(seed & 255u))) * 0.5;
+    float edge_ = 1.22 - burn * 1.3;
+    float keep = clamp((edge_ - field) / (pu * 1.5) + 0.5, 0.0, 1.0);
+    float cover = body * keep * smoothstep(0.015, 0.1, abs(den));
+    if (cover <= 0.002) {
+        return vec4(0.0);
+    }
+    hit_t = t;
+    // smouldering along where it burns: hot in the air, going out on the ground
+    float band = 1.0 - smoothstep(0.0, 0.05, edge_ - field);
+    float hot = (f.info.y > 0.5 && f.info.y < 1.5 ? exp(-lying * 1.6) : 1.0) * Ash1.w;
+    float flicker = 0.75 + 0.25 * sin(Info.x * 13.0 + ph.x * 3.0) * sin(Info.x * 7.3 + ph.y);
+    vec3 L = Sun.xyz;
+    vec3 ambient = Sky.rgb * 0.45 + Horizon.rgb * 0.2 + 0.025;
+    // two-sided and thin: light comes through it a little
+    float diffuse = (abs(dot(n, L)) * 0.75 + 0.25) * Sun.w;
+    vec3 grain = vec3(0.85 + 0.3 * vnoise(vec3(uv * 9.0, float(seed & 127u))));
+    vec3 col = AshCol.rgb * grain * (ambient + diffuse * SunColor.rgb) * lit(f.info.w);
+    col += EmberCol.rgb * band * hot * flicker * 0.8;
+    return vec4(col, cover);
+}
+
+// A speck of dust: a dot (its edge as much of a pixel as it covers), fading as it goes.
+vec4 speck_at(uint i, vec3 rd, float pa, float far, out float hit_t) {
+    hit_t = 1e9;
+    Speck s = dust[i];
+    if (s.pos.w <= 0.0) {
+        return vec4(0.0);
+    }
+    vec3 c = s.pos.xyz - Cam.xyz;
+    float t = dot(c, rd);
+    if (t <= 0.02 || t > far + 0.01) {
+        return vec4(0.0);
+    }
+    float d = length(c - rd * t);
+    float r = s.pos.w;
+    float pw = pa * t;
+    float re = max(r, pw * 0.6);
+    float fade = 1.0 - smoothstep(s.info.x * 0.55, s.info.x, s.vel.w);
+    float cover = clamp((re - d) / pw + 0.5, 0.0, 1.0) * clamp(r / re, 0.0, 1.0) * fade * 0.85;
+    if (cover <= 0.002) {
+        return vec4(0.0);
+    }
+    hit_t = t;
+    vec3 ambient = Sky.rgb * 0.45 + Horizon.rgb * 0.2 + 0.025;
+    vec3 col = AshCol.rgb * 1.25 * (ambient + Sun.w * 0.6 * SunColor.rgb) * lit(s.info.y) + EmberCol.rgb * s.info.w * Ash1.w * 1.2;
+    return vec4(col, cover);
+}
+
+vec3 ray_at(vec2 px, float dz) {
+    vec2 uv = px / Info.zw;
+    vec4 wp = InvViewProj * vec4(uv * 2.0 - 1.0, max(dz, 1e-7), 1.0);
+    return wp.xyz / wp.w;
+}
+
+void draw(ivec2 px) {
+    if (px.x >= int(Info.z) || px.y >= int(Info.w)) {
+        return;
+    }
+    uint tx = (uint(Info.z) + TILE - 1u) / TILE;
+    uint ty = (uint(Info.w) + TILE - 1u) / TILE;
+    uint tile = uint(px.y) / TILE * tx + uint(px.x) / TILE;
+    uint count = tiles[tile];
+    if (count == 0u) {
+        return;
+    }
+    // a tile whose list overflowed: all of them, whatever was left out of it
+    bool every = count > PER_TILE;
+    uint n = every ? PRIMS : count;
+    uint list = tx * ty + tile * PER_TILE;
+    // (the level's depth, maybe smaller than the frame: World resolution)
+    float dz = textureLod(Depth, (vec2(px) + 0.5) / Info.zw, 0.0).r;
+    vec3 scene = ray_at(vec2(px) + 0.5, dz);
+    float far = dz <= 0.0 ? 1e6 : length(scene);
+    vec3 rd = normalize(scene);
+    // (from points far out along the rays: ones a tenth of a block out the view's bob turned)
+    float pa = length(normalize(ray_at(vec2(px) + vec2(1.5, 0.5), 0.0)) - normalize(ray_at(vec2(px) + 0.5, 0.0)));
+    // the nearest of all, the rest blended behind it
+    float near_t = 1e9;
+    vec4 near_c = vec4(0.0);
+    vec3 rest = vec3(0.0);
+    float rest_a = 0.0;
+    for (uint j = 0u; j < n; j++) {
+        uint prim = every ? j : tiles[list + j];
+        float t;
+        vec4 c = prim < MOST_FLAKES ? flake_at(prim, rd, pa, far, t) : speck_at(prim - MOST_FLAKES, rd, pa, far, t);
+        if (c.a <= 0.0) {
+            continue;
+        }
+        if (t < near_t) {
+            if (near_c.a > 0.0) {
+                rest += near_c.rgb * near_c.a;
+                rest_a += near_c.a;
+            }
+            near_t = t;
+            near_c = c;
+        } else {
+            rest += c.rgb * c.a;
+            rest_a += c.a;
+        }
+    }
+    if (near_c.a <= 0.0) {
+        return;
+    }
+    vec4 c4 = imageLoad(Canvas, px);
+    vec3 col = to_linear(c4.rgb);
+    if (rest_a > 0.0) {
+        col = mix(col, rest / rest_a, min(rest_a, 1.0));
+    }
+    col = mix(col, near_c.rgb, near_c.a);
+    imageStore(Canvas, px, vec4(to_srgb(col), c4.a));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (Stage == 0) {
+        if (i < MOST_FLAKES) {
+            step_flake(i);
+        }
+    } else if (Stage == 1) {
+        if (i < MOST_DUST) {
+            step_speck(i);
+        }
+    } else if (Stage == 2) {
+        if (i < PRIMS) {
+            bin(i);
+        }
+    } else {
+        // (dispatched as 64 a group, the groups across and down the frame: a group 8 by 8 pixels)
+        uvec2 base = gl_WorkGroupID.xy * 8u;
+        uint l = gl_LocalInvocationID.x;
+        draw(ivec2(base + uvec2(l % 8u, l / 8u)));
+    }
+}

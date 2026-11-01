@@ -1,0 +1,13 @@
+<component name="libraryTable">
+  <library name="fabric-api">
+    <CLASSES>
+      <root url="file://$PROJECT_DIR$/libs/fabric-api" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES>
+      <root url="file://$PROJECT_DIR$/libs/sources/fabric-api" />
+    </SOURCES>
+    <jarDirectory url="file://$PROJECT_DIR$/libs/fabric-api" recursive="false" />
+    <jarDirectory url="file://$PROJECT_DIR$/libs/sources/fabric-api" recursive="false" type="SOURCES" />
+  </library>
+</component>

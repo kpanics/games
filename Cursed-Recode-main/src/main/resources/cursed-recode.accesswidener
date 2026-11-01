@@ -1,0 +1,222 @@
+accessWidener v2 official
+# 26.3 без обфускации и без intermediary, поэтому пространство имён здесь — official (это и есть имена Mojang).
+# Формат: accessible|extendable|mutable  class|method|field  <класс> [<имя> <дескриптор>]
+accessible field net/minecraft/client/Minecraft instance Lnet/minecraft/client/Minecraft;
+# Items' model boxes remembered (ItemStackRenderStateMixin).
+accessible field net/minecraft/client/renderer/item/ItemStackRenderState$LayerRenderState extents Ljava/util/function/Supplier;
+accessible field net/minecraft/client/renderer/item/ItemStackRenderState$LayerRenderState itemTransform Lnet/minecraft/client/resources/model/cuboid/ItemTransform;
+accessible field net/minecraft/client/renderer/item/ItemStackRenderState$LayerRenderState localTransform Lorg/joml/Matrix4f;
+# The weather's biome cells (cursed.recode.scene.WeatherBiomes).
+accessible field net/minecraft/world/level/biome/BiomeManager biomeZoomSeed J
+# Entity vertices on the GPU (cursed.recode.scene.ModelJobs, StagedVertexBufferMixin).
+accessible field com/mojang/blaze3d/vertex/ByteBufferBuilder pointer J
+accessible field net/minecraft/client/renderer/StagedVertexBuffer$Draw format Lcom/mojang/renderpearl/api/vertex/VertexFormat;
+accessible field net/minecraft/client/renderer/StagedVertexBuffer$Draw quadSorting Lcom/mojang/blaze3d/vertex/VertexSorting;
+# Translucent quads ordered natively (cursed.recode.scene.QuadSort).
+accessible field net/minecraft/client/renderer/StagedVertexBuffer$Draw vertexBufferSlices Ljava/util/List;
+accessible field net/minecraft/client/renderer/StagedVertexBuffer$Draw vertexCount I
+# Which native library the game is loading (mixin NativeLibrariesBootstrapMixin).
+accessible class com/mojang/blaze3d/platform/NativeLibrariesBootstrap$LibraryLoadEntry
+# Native section mesher (cursed.recode.world): the models' structure for the block tables...
+accessible field net/minecraft/client/renderer/block/dispatch/SingleVariant model Lnet/minecraft/client/renderer/block/dispatch/BlockStateModelPart;
+accessible field net/minecraft/client/renderer/block/dispatch/WeightedVariants list Lnet/minecraft/util/random/WeightedList;
+accessible field net/minecraft/client/renderer/block/dispatch/multipart/MultiPartModel shared Lnet/minecraft/client/renderer/block/dispatch/multipart/MultiPartModel$SharedBakedState;
+accessible field net/minecraft/client/renderer/block/dispatch/multipart/MultiPartModel blockState Lnet/minecraft/world/level/block/state/BlockState;
+accessible class net/minecraft/client/renderer/block/dispatch/multipart/MultiPartModel$SharedBakedState
+accessible method net/minecraft/world/level/block/state/BlockBehaviour getMaxHorizontalOffset ()F
+accessible method net/minecraft/world/level/block/state/BlockBehaviour getMaxVerticalOffset ()F
+# ...the section's blocks as the compiler sees them...
+accessible field net/minecraft/client/renderer/chunk/RenderSectionRegion sections [Lnet/minecraft/client/renderer/chunk/SectionCopy;
+accessible field net/minecraft/client/renderer/chunk/RenderSectionRegion minSectionX I
+accessible field net/minecraft/client/renderer/chunk/RenderSectionRegion minSectionY I
+accessible field net/minecraft/client/renderer/chunk/RenderSectionRegion minSectionZ I
+accessible field net/minecraft/client/renderer/chunk/SectionCopy section Lnet/minecraft/world/level/chunk/PalettedContainer;
+accessible field net/minecraft/client/renderer/chunk/SectionCopy debug Z
+# ...and the light, read as the light engine reads it (LayerLightSectionStorage.getLightValue).
+accessible field net/minecraft/world/level/lighting/LightEngine storage Lnet/minecraft/world/level/lighting/LayerLightSectionStorage;
+accessible field net/minecraft/world/level/lighting/LayerLightSectionStorage visibleSectionData Lnet/minecraft/world/level/lighting/DataLayerStorageMap;
+accessible class net/minecraft/world/level/lighting/SkyLightSectionStorage$SkyDataLayerStorageMap
+accessible field net/minecraft/world/level/lighting/SkyLightSectionStorage$SkyDataLayerStorageMap currentLowestY I
+accessible field net/minecraft/world/level/lighting/SkyLightSectionStorage$SkyDataLayerStorageMap topSections Lit/unimi/dsi/fastutil/longs/Long2IntOpenHashMap;
+accessible field net/minecraft/world/level/chunk/DataLayer data [B
+accessible field net/minecraft/world/level/chunk/DataLayer defaultValue I
+# ...the section's own blocks in one go (the palette and the packed ids).
+accessible field net/minecraft/world/level/chunk/PalettedContainer data Lnet/minecraft/world/level/chunk/PalettedContainer$Data;
+accessible class net/minecraft/world/level/chunk/PalettedContainer$Data
+# Native entity models (cursed.recode.scene.NativeModels): whether a pose's normals need normalizing.
+accessible field com/mojang/blaze3d/vertex/PoseStack$Pose trustedNormals Z
+# Native item quads (cursed.recode.scene.NativeItems): the item renderer's builder per render type.
+accessible method net/minecraft/client/renderer/feature/RenderTypeFeatureRenderer getVertexBuilder (Lnet/minecraft/client/renderer/rendertype/RenderType;)Lcom/mojang/blaze3d/vertex/VertexConsumer;
+# Native particles (cursed.recode.scene.NativeParticles): a layer's particle arrays.
+accessible class net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage
+accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage floatValues [F
+accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage intValues [I
+accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState$Storage currentParticleIndex I
+accessible field net/minecraft/client/renderer/state/level/QuadParticleRenderState particles Ljava/util/Map;
+# Native world text (cursed.recode.scene.NativeText): a glyph's sheet coordinates and its instances.
+accessible class net/minecraft/client/gui/font/glyphs/BakedSheetGlyph$GlyphInstance
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph u0 F
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph u1 F
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph v0 F
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph v1 F
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph left F
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph right F
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph up F
+accessible field net/minecraft/client/gui/font/glyphs/BakedSheetGlyph down F
+# Native fluids (cursed.recode.world.BlockExport): the game's trigonometry tables, exported as they are.
+accessible field net/minecraft/util/Mth SIN [F
+accessible field net/minecraft/util/Mth ASIN_TAB [D
+accessible field net/minecraft/util/Mth COS_TAB [D
+# GUI layer search over int rectangles (GuiRenderStateMixin): the layers themselves.
+accessible class net/minecraft/client/renderer/state/gui/GuiRenderState$Node
+# The engine's materials (cursed.recode.engine.Materials): a sprite's own pixels.
+accessible field net/minecraft/client/renderer/texture/SpriteContents originalImage Lcom/mojang/blaze3d/platform/NativeImage;
+# The menus (cursed.recode.menus): a screen's widgets as the game laid them out, read and worked by the client's pages.
+accessible field net/minecraft/client/gui/screens/Screen renderables Ljava/util/List;
+accessible field net/minecraft/client/gui/components/AbstractSliderButton value D
+accessible method net/minecraft/client/gui/components/AbstractSliderButton setValue (D)V
+accessible field net/minecraft/client/gui/components/CycleButton name Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/components/CycleButton values Lnet/minecraft/client/gui/components/CycleButton$ValueListSupplier;
+accessible field net/minecraft/client/gui/components/CycleButton valueStringifier Ljava/util/function/Function;
+accessible field net/minecraft/client/gui/components/EditBox hint Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/components/EditBox maxLength I
+accessible field net/minecraft/client/gui/components/AbstractWidget tooltip Lnet/minecraft/client/gui/components/WidgetTooltipHolder;
+accessible field net/minecraft/client/gui/components/WidgetTooltipHolder tooltip Lnet/minecraft/client/gui/components/Tooltip;
+accessible field net/minecraft/client/gui/components/Tooltip message Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/OptionInstance caption Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/OptionInstance toString Ljava/util/function/Function;
+accessible field net/minecraft/client/OptionInstance tooltip Lnet/minecraft/client/OptionInstance$TooltipSupplier;
+accessible field net/minecraft/client/OptionInstance initialValue Ljava/lang/Object;
+accessible class net/minecraft/client/gui/components/OptionsList$Entry
+accessible class net/minecraft/client/gui/components/OptionsList$HeaderEntry
+accessible field net/minecraft/client/gui/components/OptionsList$Entry children Ljava/util/List;
+accessible field net/minecraft/client/gui/components/OptionsList$HeaderEntry widget Lnet/minecraft/client/gui/components/FocusableTextWidget;
+accessible method net/minecraft/client/gui/components/CycleButton cycleValue (I)V
+accessible class net/minecraft/client/gui/components/AbstractSelectionList$Entry
+accessible field net/minecraft/client/gui/screens/options/OptionsSubScreen list Lnet/minecraft/client/gui/components/OptionsList;
+accessible field net/minecraft/client/gui/screens/worldselection/SelectWorldScreen list Lnet/minecraft/client/gui/screens/worldselection/WorldSelectionList;
+accessible method net/minecraft/client/gui/screens/worldselection/WorldSelectionList pollLevelsIgnoreErrors ()Ljava/util/List;
+accessible method net/minecraft/client/gui/screens/worldselection/WorldSelectionList handleNewLevels (Ljava/util/List;)V
+accessible field net/minecraft/client/gui/screens/worldselection/WorldSelectionList currentlyDisplayedLevels Ljava/util/List;
+accessible method net/minecraft/client/gui/screens/worldselection/CreateWorldScreen onCreate ()V
+accessible method net/minecraft/client/gui/screens/worldselection/CreateWorldScreen openExperimentsScreen (Lnet/minecraft/world/level/WorldDataConfiguration;)V
+accessible method net/minecraft/client/gui/screens/worldselection/CreateWorldScreen openDataPackSelectionScreen (Lnet/minecraft/world/level/WorldDataConfiguration;)V
+accessible field net/minecraft/client/gui/screens/multiplayer/JoinMultiplayerScreen serverSelectionList Lnet/minecraft/client/gui/screens/multiplayer/ServerSelectionList;
+accessible method net/minecraft/client/gui/screens/multiplayer/JoinMultiplayerScreen onSelectedChange ()V
+accessible field net/minecraft/client/gui/screens/multiplayer/ServerSelectionList$NetworkServerEntry serverData Lnet/minecraft/client/server/LanServer;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementsScreen tabs Ljava/util/Map;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementsScreen selectedTab Lnet/minecraft/client/gui/screens/advancements/AdvancementTab;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementsScreen advancements Lnet/minecraft/client/multiplayer/ClientAdvancements;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementTab widgets Ljava/util/Map;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementTab icon Lnet/minecraft/world/item/ItemStack;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementWidget progress Lnet/minecraft/advancements/AdvancementProgress;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementWidget icon Lnet/minecraft/world/item/ItemStack;
+accessible field net/minecraft/client/gui/screens/advancements/AdvancementWidget advancementNode Lnet/minecraft/advancements/AdvancementNode;
+accessible field net/minecraft/client/gui/screens/achievement/StatsScreen isLoading Z
+accessible field net/minecraft/client/gui/screens/achievement/StatsScreen stats Lnet/minecraft/stats/StatsCounter;
+accessible field net/minecraft/client/gui/screens/ConnectScreen status Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/ProgressScreen header Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/ProgressScreen stage Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/ProgressScreen progress I
+accessible field net/minecraft/client/gui/screens/LevelLoadingScreen loadTracker Lnet/minecraft/client/multiplayer/LevelLoadTracker;
+accessible field net/minecraft/client/gui/screens/LevelLoadingScreen smoothedProgress F
+accessible field net/minecraft/client/gui/screens/LevelLoadingScreen reason Lnet/minecraft/client/gui/screens/LevelLoadingScreen$Reason;
+accessible field net/minecraft/client/gui/screens/GenericWaitingScreen showLoadingDots Z
+accessible field net/minecraft/client/gui/screens/GenericWaitingScreen messageText Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/AlertScreen messageText Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/ErrorScreen messageText Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/DatapackLoadFailureScreen message Lnet/minecraft/client/gui/components/MultiLineLabel;
+accessible field net/minecraft/client/gui/screens/BackupConfirmScreen description Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/options/UnsupportedGraphicsWarningScreen message Ljava/util/List;
+accessible field net/minecraft/client/gui/screens/worldselection/OptimizeWorldScreen upgrader Lnet/minecraft/util/worldupdate/WorldUpgrader;
+accessible field net/minecraft/client/gui/screens/ConfirmLinkScreen url Ljava/net/URI;
+accessible field net/minecraft/client/gui/screens/DeathScreen delayTicker I
+accessible field net/minecraft/client/gui/screens/DeathScreen causeOfDeath Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/DeathScreen hardcore Z
+accessible field net/minecraft/client/gui/screens/DeathScreen deathScore Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/DeathScreen exitButtons Ljava/util/List;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen socialInteractionsPlayerList Lnet/minecraft/client/gui/screens/social/SocialInteractionsPlayerList;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen searchBox Lnet/minecraft/client/gui/components/EditBox;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen page Lnet/minecraft/client/gui/screens/social/SocialInteractionsScreen$Page;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen allButton Lnet/minecraft/client/gui/components/Button;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen hiddenButton Lnet/minecraft/client/gui/components/Button;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen blockedButton Lnet/minecraft/client/gui/components/Button;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen blockingHintButton Lnet/minecraft/client/gui/components/Button;
+accessible field net/minecraft/client/gui/screens/social/SocialInteractionsScreen serverLabel Lnet/minecraft/network/chat/Component;
+accessible method net/minecraft/client/gui/screens/social/SocialInteractionsScreen showPage (Lnet/minecraft/client/gui/screens/social/SocialInteractionsScreen$Page;)V
+accessible field net/minecraft/client/gui/screens/social/PlayerEntry hasRecentMessages Z
+accessible field net/minecraft/client/gui/screens/social/PlayerEntry hideButton Lnet/minecraft/client/gui/components/Button;
+accessible field net/minecraft/client/gui/screens/social/PlayerEntry showButton Lnet/minecraft/client/gui/components/Button;
+accessible field net/minecraft/client/gui/screens/social/PlayerEntry reportButton Lnet/minecraft/client/gui/components/Button;
+accessible method net/minecraft/client/gui/screens/social/PlayerEntry getStatusComponent ()Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/components/PlayerTabOverlay footer Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/components/PlayerTabOverlay header Lnet/minecraft/network/chat/Component;
+accessible method net/minecraft/client/multiplayer/PlayerInfo setLatency (I)V
+accessible field net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen currentlyHovered Lnet/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon;
+accessible method net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen switchToHoveredGameMode ()V
+accessible method net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen switchToHoveredGameMode (Lnet/minecraft/client/Minecraft;Lnet/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon;)V
+accessible field net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon VALUES [Lnet/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon;
+accessible field net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon name Lnet/minecraft/network/chat/Component;
+accessible field net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon mode Lnet/minecraft/world/level/GameType;
+accessible field net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon renderStack Lnet/minecraft/world/item/ItemStack;
+accessible class net/minecraft/client/gui/screens/debug/GameModeSwitcherScreen$GameModeIcon
+accessible field net/minecraft/client/gui/screens/WinScreen poem Z
+accessible field net/minecraft/client/gui/screens/WinScreen scroll F
+accessible field net/minecraft/client/gui/screens/WinScreen lines Ljava/util/List;
+accessible field net/minecraft/client/gui/screens/WinScreen centeredLines Lit/unimi/dsi/fastutil/ints/IntSet;
+accessible field net/minecraft/client/gui/screens/WinScreen scrollSpeed F
+accessible field net/minecraft/client/gui/screens/packs/PackSelectionScreen model Lnet/minecraft/client/gui/screens/packs/PackSelectionModel;
+accessible field net/minecraft/client/gui/screens/packs/PackSelectionScreen availablePackList Lnet/minecraft/client/gui/screens/packs/TransferableSelectionList;
+accessible field net/minecraft/client/gui/screens/packs/PackSelectionScreen selectedPackList Lnet/minecraft/client/gui/screens/packs/TransferableSelectionList;
+accessible field net/minecraft/client/gui/screens/packs/PackSelectionScreen search Lnet/minecraft/client/gui/components/EditBox;
+accessible field net/minecraft/client/gui/screens/packs/PackSelectionScreen packDir Ljava/nio/file/Path;
+accessible field net/minecraft/client/gui/screens/packs/PackSelectionScreen doneButton Lnet/minecraft/client/gui/components/Button;
+accessible field net/minecraft/client/gui/screens/packs/TransferableSelectionList$PackEntry pack Lnet/minecraft/client/gui/screens/packs/PackSelectionModel$Entry;
+accessible method net/minecraft/client/gui/screens/packs/TransferableSelectionList$PackEntry keyboardSelection ()V
+accessible method net/minecraft/client/gui/screens/packs/TransferableSelectionList$PackEntry keyboardMoveUp ()V
+accessible method net/minecraft/client/gui/screens/packs/TransferableSelectionList$PackEntry keyboardMoveDown ()V
+accessible field net/minecraft/client/gui/components/toasts/ToastManager visibleToasts Ljava/util/List;
+accessible field net/minecraft/client/gui/components/toasts/ToastManager nowPlayingToast Lnet/minecraft/client/gui/components/toasts/ToastManager$ToastInstance;
+accessible field net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance toast Lnet/minecraft/client/gui/components/toasts/Toast;
+accessible field net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance firstSlotIndex I
+accessible field net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance occupiedSlotCount I
+accessible field net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance fullyVisibleFor J
+accessible field net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance visiblePortion F
+accessible field net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance hasFinishedRendering Z
+accessible method net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance extractRenderState (Lnet/minecraft/client/gui/GuiGraphicsExtractor;I)V
+accessible field net/minecraft/client/gui/components/toasts/AdvancementToast advancement Lnet/minecraft/advancements/AdvancementHolder;
+accessible field net/minecraft/client/gui/components/toasts/AdvancementToast iconItem Lnet/minecraft/world/item/ItemStack;
+accessible field net/minecraft/client/gui/components/toasts/RecipeToast recipeItems Ljava/util/List;
+accessible field net/minecraft/client/gui/components/toasts/RecipeToast displayedRecipeIndex I
+accessible field net/minecraft/client/gui/components/toasts/SystemToast titleLines Ljava/util/List;
+accessible field net/minecraft/client/gui/components/toasts/SystemToast messageLines Ljava/util/List;
+accessible field net/minecraft/client/gui/components/toasts/TutorialToast icon Lnet/minecraft/client/gui/components/toasts/TutorialToast$Icons;
+accessible field net/minecraft/client/gui/components/toasts/TutorialToast lines Ljava/util/List;
+accessible field net/minecraft/client/gui/components/toasts/TutorialToast smoothedProgress F
+accessible field net/minecraft/client/gui/components/toasts/TutorialToast progressable Z
+accessible class net/minecraft/client/gui/components/toasts/ToastManager$ToastInstance
+accessible class net/minecraft/client/gui/components/toasts/RecipeToast$Entry
+accessible field net/minecraft/client/gui/Hud autosaveIndicatorValue F
+accessible field net/minecraft/client/gui/Hud lastAutosaveIndicatorValue F
+accessible field net/minecraft/client/gui/components/PlayerSkinWidget wideModel Lnet/minecraft/client/model/Model$Simple;
+accessible field net/minecraft/client/gui/components/PlayerSkinWidget slimModel Lnet/minecraft/client/model/Model$Simple;
+accessible field net/minecraft/client/gui/components/PlayerSkinWidget rotationX F
+accessible field net/minecraft/client/gui/components/PlayerSkinWidget rotationY F
+# Menus item stage (menus/ItemStage): the frame's items as one picture in picture
+accessible field net/minecraft/client/gui/GuiGraphicsExtractor guiRenderState Lnet/minecraft/client/renderer/state/gui/GuiRenderState;
+# Chams (cursed.recode.chams.Chams): a render type's twin with the same textures and settings, its own pipeline
+accessible field net/minecraft/client/renderer/rendertype/RenderType state Lnet/minecraft/client/renderer/rendertype/RenderSetup;
+accessible method net/minecraft/client/renderer/rendertype/RenderType create (Ljava/lang/String;Lnet/minecraft/client/renderer/rendertype/RenderSetup;)Lnet/minecraft/client/renderer/rendertype/RenderType;
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup pipeline Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup textures Ljava/util/Map;
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup textureTransform Lnet/minecraft/client/renderer/rendertype/TextureTransform;
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup outlineProperty Lnet/minecraft/client/renderer/rendertype/RenderSetup$OutlineProperty;
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup outlineTextureName Ljava/lang/String;
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup useLightmap Z
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup useOverlay Z
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup affectsCrumbling Z
+accessible field net/minecraft/client/renderer/rendertype/RenderSetup layeringTransform Lnet/minecraft/client/renderer/rendertype/LayeringTransform;
+accessible class net/minecraft/client/renderer/rendertype/RenderSetup$TextureBinding
+# Block Outline (cursed.recode.fx.BlockOutline): how far the block being broken is.
+accessible field net/minecraft/client/multiplayer/MultiPlayerGameMode destroyProgress F
+accessible field net/minecraft/client/multiplayer/MultiPlayerGameMode destroyBlockPos Lnet/minecraft/core/BlockPos;

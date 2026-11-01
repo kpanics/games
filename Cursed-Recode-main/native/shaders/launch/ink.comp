@@ -1,0 +1,131 @@
+// The launch «ink» (launch/ink.rs; her choice, 15.10: the outlines' state kept while the game loads, alive, then the
+// picture coming smoothly): a drop of ink lands on the desktop and spreads as in water — curling, threads ahead of it —
+// into the window, its edge clean there; a pen draws the valley's outlines in white out of the black, here and there, in
+// a few seconds; while the game loads the drawing lives (the valley under it does: the water's lines tremble, the crows
+// fly, the tree sways) and its lines fill with light from the left as the game gets on; when it is ready the picture
+// fills in from its lines — nearest them first, the light before the dark — and the lines go into it. On the way out the
+// valley goes back into its outlines and the ink runs down off the desktop in streaks. Out: premultiplied RGBA.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D Pic;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D Out;
+layout(set = 0, binding = 3, std140) uniform InkBlock { vec4 G[4]; };
+
+#define kSpread G[0].x
+#define kDraw G[0].y
+#define kAlive G[0].z
+#define kDrop G[0].w
+#define kEngr G[1].x
+#define kDrain G[1].y
+#define kExit G[1].w
+#define kQuit G[2].x
+#define kLoad G[2].y
+#define kT G[3].x
+
+float lum(vec3 c){ return dot(c, vec3(.299, .587, .114)); }
+float lumAt(vec2 uv){ return lum(textureLod(Pic, uv, 0.).rgb); }
+// The outline's strength at uv: how sharply the light changes there (`ox`, `oy` two pixels across, up). A world's frame
+// (its blocks' textures everywhere) only by its bigger edges.
+float edgeAt(vec2 uv, vec2 ox, vec2 oy){
+  float wk = WorldA.x;
+  vec2 o1 = ox * (1. + .6 * wk), o2 = oy * (1. + .6 * wk);
+  float g = length(vec2(lumAt(uv + o1) - lumAt(uv - o1), lumAt(uv + o2) - lumAt(uv - o2)));
+  return smoothstep(mix(.035, .1, wk), mix(.11, .22, wk), g);
+}
+
+void main(){
+  ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 size = textureSize(Pic, 0);
+  if (q.x >= size.x || q.y >= size.y) return;
+  vec2 res = vec2(size);
+  vec2 frag = vec2(float(q.x) + .5, res.y - float(q.y) - .5);
+  vec2 p0 = (frag - res * .5) / (res.y * .5);
+  float A = res.x / res.y;
+  float pu = 2. / res.y;
+  // the way out (1); into a world (2: the valley into its outlines, then the world filling in from them)
+  bool out_ = kExit > .5 && kExit < 1.5;
+  bool into = kExit > 1.5;
+
+  // the way out: the ink runs down as a liquid would — broad slow flows, a few thin fast drips ahead of them (what is
+  // drawn on it goes with it)
+  float drip = 0.;
+  if (out_ && kDrain > 0.) {
+    float xs = frag.x / res.y;
+    float v = .62 + .6 * fbm2(vec2(xs * 3.1, 1.7)) + 1.1 * pow(vn2(vec2(xs * 24., 4.2)), 7.);
+    drip = pow(kDrain, 1.7) * 2.7 * v;
+  }
+  vec2 p = p0 + vec2(0., drip);
+  vec2 frag2 = (p * res.y * .5) + res * .5;
+  vec2 iuv = vec2(frag2.x, res.y - frag2.y) / res;
+
+  // the ink: from the drop, spreading as in water, curling as it goes; threads ahead of it
+  float r = length(p);
+  float tw = .55 * smoothstep(.05, 1.2, r) * (fbm2(p * .9 + 5.) - .4);
+  vec2 pr = vec2(p.x * cos(tw) - p.y * sin(tw), p.x * sin(tw) + p.y * cos(tw));
+  vec2 wp = pr + .2 * vec2(fbm2(pr * 1.4 + 3.), fbm2(pr * 1.4 + 8.)) - .1;
+  float rr = length(wp);
+  float ang = atan(wp.y, wp.x);
+  float fing = .34 * fbm2(vec2(ang * 1.3 + 4., 2.)) + .06 * fbm2(vec2(ang * 4.5, rr * 1.5 + 1.));
+  float frontR = kSpread * 3.1 * (1. - fing);
+  float body = max(smoothstep(frontR, frontR - .025, rr), smoothstep(.88, 1., kSpread));
+  float thread = pow(1. - abs(gn2(vec2(ang * 5., rr * 1.2 - kSpread))), 16.) * smoothstep(frontR + .35 * kSpread, frontR, rr) * step(frontR - .02, rr) * step(.02, kSpread) * (1. - kSpread);
+  // (the top edge meets the window's bar, not the desktop: no soft edge there — it let the desktop through as a thread
+  // under the bar, her screenshot of 19.10 —, the window's own edge is soft in twin.comp; until the ink runs down)
+  float topIn = pu * 1.5 * (1. - smoothstep(0., pu * 3., drip));
+  float edgeD = min(A - abs(p.x), min(1. - p.y + topIn, 1. + p.y));
+  float inWin = smoothstep(0., pu * 1.5, edgeD);
+  float dropR = .028 * smoothstep(0., .4, kDrop) * (1. + .3 * kSpread);
+  float drop = (1. - smoothstep(dropR - pu, dropR + pu, r)) * step(.001, kDrop);
+  float ink = out_ ? inWin : clamp(max(max(body, thread * .7), drop), 0., 1.) * inWin;
+  float thin = out_ ? 0. : smoothstep(frontR - .2, frontR, rr) * (1. - kSpread);
+  float rim = exp(-pow((rr - frontR + .012) / .01, 2.)) * (1. - kSpread);
+  float inkA = ink * (1. - .45 * thin);
+  vec3 inkC = vec3(.01 - .006 * rim + .012 * fbm2(p * 3.) * (1. - kSpread));
+
+  // the outlines, of the living valley under it
+  float px = res.y / 1080.;
+  vec2 ox = vec2(2. * px / res.x, 0.), oy = vec2(0., 2. * px / res.y);
+  // drawn by hand: the lines sway a little, always (a drawing that lives, not one that hangs)
+  vec2 boil = vec2(gn2(p * 6. + vec2(kT * 1.7, 0.)), gn2(p * 6. + vec2(11., kT * 1.9))) * 1.1 * px / res;
+  float contour = edgeAt(iuv + boil, ox, oy);
+  // drawn by the pen here and there across it, its point bright where it is
+  float draw = out_ ? 1. : kDraw;
+  float tc = clamp((fbm2(p * 1.6 + 3.) - .22) / .56, 0., 1.) * .92 + .02;
+  float shown = smoothstep(tc, tc + .03, draw);
+  float pen = exp(-pow((draw - tc) / .012, 2.)) * contour * step(draw, .999);
+  // the loading: the lines grey at first, filling with light from the left as the game gets on; breathing a little
+  float front = kLoad * (2. * A + .7) - A - .35;
+  float lit = out_ ? 1. : smoothstep(front + .3, front - .05, p.x + .18 * (fbm2(p * 2. + 6.) - .5));
+  float lineB = mix(.4, .95, lit) * (.94 + .06 * sin(kT * 1.3 + p.x * .8));
+  float line = contour * shown;
+  vec3 lines = inkC + vec3(lineB) * line + vec3(.75) * pen * (1. - lit * .5);
+
+  // alive: the picture fills in from its lines (nearest them first, the light before the dark), the lines going into
+  // it; on the way out the other way
+  vec3 live = textureLod(Pic, iuv, 0.).rgb;
+  float k = out_ ? 1. - kEngr : (into ? max(1. - kEngr, kAlive) : kAlive);
+  vec3 col = lines;
+  if (k > 0.) {
+    float near = contour;
+    if (k < 1.) {
+      float n1 = 0., n2 = 0.;
+      for (int j = 0; j < 8; j++) {
+        float a = float(j) * .785 + .3;
+        vec2 o = vec2(cos(a) / res.x, sin(a) / res.y) * px;
+        n1 += edgeAt(iuv + o * 7., ox, oy);
+        n2 += edgeAt(iuv + o * 17., ox, oy);
+      }
+      near = max(near, max(n1 / 8. * .9, n2 / 8. * .55));
+    }
+    float L = lum(live);
+    float delay = .52 * (1. - near) + .36 * (1. - clamp(L * 2.2, 0., 1.)) + .12 * fbm2(p * 3. + 2.);
+    float al = clamp((k * 1.35 - delay) / .32, 0., 1.);
+    // the light leaving the lines into the picture: they flare as it goes
+    vec3 glow = vec3(lineB) * line * (1. + 1.4 * al * (1. - al) * 4.);
+    col = mix(inkC + glow + vec3(.75) * pen, live, al);
+    col += vec3(.18) * near * al * (1. - al) * 4. * (out_ ? .5 : 1.);
+  }
+
+  float a = (out_ ? inWin : mix(inkA, inWin, k)) * (1. - kQuit);
+  col += (hq(vec2(q), 7.) - .5) / 255.;
+  imageStore(Out, q, vec4(min(col * a, vec3(a)), a));
+}

@@ -1,0 +1,981 @@
+#version 450
+// Chams' polymorphic liquid (engine/liquid.rs): a body in it drawn as one liquid with its drops — the body's model as
+// boxes (Java gives each part's cube where its pose is this frame, and the light on it), the drops round it simulated
+// here — all of them one surface: where two come near each other they join as a liquid does (the two nearest
+// distances one smooth union, its neck no wider than the thinner of them allows: an arrow stays an arrow), so a drop
+// flowing back into the body bridges to it and sinks in, one leaving draws a neck out of it before it parts.
+// The drops come out of the body's surface, are drawn back to a shell round it, swirl round it and tremble, come back
+// and sink in; some fall, splash on the ground (droplets flying off) and lie there, or crawl back to the body over the
+// ground and climb into it. Fast ones stretch along their way.
+// The liquid is what the player made it (data.rs LIQUIDS: water, mercury, oil, or their own): its colour, what its
+// depth takes the light to, how clear, how much it bends what is behind it (and splits its colours), how much of a
+// mirror and of a metal, how rough, its rainbow film, its bubbles; how thick, how heavy.
+// Stage 0: the splashes' droplets a step on; stage 3: the drops. Stage 1: each box and drop into the lists of the
+// screen's tiles (16 by 16 pixels) it covers (none containing the camera: a body is not seen from inside, as the game's
+// are not). Stage 2: the ray through each pixel to the liquid's surface (its silhouette smoothed: a ray passing within a
+// pixel of it takes as much of it), and the liquid there over the frame's copy: what is behind it bent through it and
+// dimmed by its depth, the world mirrored in it (found in the frame along the reflection, the sky past it), the sun's
+// highlight.
+
+layout(local_size_x = 64, local_size_y = 1) in;
+
+struct Drop {
+    // where (blocks from the anchor), its radius (0: none)
+    vec4 pos;
+    // how fast (blocks a second), its age (s; below 0 waiting to come out)
+    vec4 vel;
+    // x how long it lives (s), y what it does (0 round the body, 1 going back in, 2 falling, 3 on the ground, 4 a
+    // splash's droplet), z its own number, w the light on it (0..1)
+    vec4 info;
+};
+
+layout(std430, set = 0, binding = 0) buffer Drops {
+    Drop drops[];
+};
+// each tile's count, then each tile's list (PER_TILE long)
+layout(std430, set = 0, binding = 1) buffer Tiles {
+    uint tiles[];
+};
+// the splashes' droplets let go (their ring goes round)
+layout(std430, set = 0, binding = 2) buffer Counters {
+    uint counters[];
+};
+layout(set = 0, binding = 3, rgba8) uniform image2D Canvas;
+layout(set = 0, binding = 4) uniform sampler2D Depth;
+layout(set = 0, binding = 5) uniform sampler2D Behind;
+layout(set = 0, binding = 6) uniform usampler2DArray CursedVoxels;
+layout(std140, set = 0, binding = 7) uniform U {
+    mat4 ViewProj;
+    mat4 InvViewProj;
+    // the camera from the anchor (blocks), the step (s)
+    vec4 Cam;
+    // x seconds, y how many boxes, z the frame's width, w its height
+    vec4 Info;
+    // x how many drops live, y their size, z how far they reach to join (merging), w how restless
+    vec4 Look;
+    // the liquid's colour (linear), w how clear (0..1)
+    vec4 Tint;
+    vec4 Sky;
+    // the horizon's colour, w how much of the day it is (0..1)
+    vec4 Horizon;
+    // the sun (xyz direction, w how much)
+    vec4 Sun;
+    // x how much it mirrors, y the drops on (1), z the quality (0 low .. 3 ultra), w how rough (0..1)
+    vec4 More;
+    // how far the anchor moved this step (blocks), w how much of a metal (0..1)
+    vec4 Shift;
+    // what its depth takes the light to (linear), w how much it bends (1 as made)
+    vec4 Deep;
+    // its highlights' colour, w its rainbow film (0..1)
+    vec4 Shine;
+    // its rim's colour, w its bubbles (1 as made)
+    vec4 Rim;
+    // x how thick, y how heavy, z how far its drops fly, w how fast they come back (1 each as made)
+    vec4 Motion;
+    // x splashes on (1), y crawling back on (1), z whether there is a voxel window (1)
+    vec4 Flags;
+    ivec4 Anchor;
+    ivec4 Window;
+    ivec4 WindowSize;
+    vec4 SunColor;
+    // the boxes: middle (xyz from the camera, w its body), three half-sides (w of the first the block light on the
+    // body, of the second the sky's, 0..1, of the third the boxes' surface up to and with this one, 0..1)
+    vec4 Boxes[512];
+};
+layout(push_constant) uniform P {
+    int Stage;
+};
+
+const uint MOST_BOXES = 128u;
+// the drops: those of the bodies, then the splashes' droplets
+const uint MAIN_DROPS = 1280u;
+const uint SPLASH_DROPS = 256u;
+const uint MOST_DROPS = MAIN_DROPS + SPLASH_DROPS;
+const uint TILE = 16u;
+// a tile's list; one that would hold more (a body far off, all of it in a few tiles) takes all of them instead, so
+// nothing is left out (what would be would change from frame to frame)
+const uint PER_TILE = 256u;
+
+// ---- the numbers of chance ----
+uint hash_u(uint n) {
+    n ^= n >> 16;
+    n *= 0x7feb352du;
+    n ^= n >> 15;
+    n *= 0x846ca68bu;
+    n ^= n >> 16;
+    return n;
+}
+
+float hash1(uint n) {
+    return float(hash_u(n) & 0xffffffu) / 16777216.0;
+}
+
+vec3 hash3(uint n) {
+    return vec3(hash1(n), hash1(n ^ 0x9e3779b9u), hash1(n ^ 0x85ebca6bu));
+}
+
+float vnoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    ivec3 b = ivec3(i);
+    float n[8];
+    for (int k = 0; k < 8; k++) {
+        ivec3 o = b + ivec3(k & 1, (k >> 1) & 1, k >> 2);
+        n[k] = hash1(uint(o.x) * 73856093u ^ uint(o.y) * 19349663u ^ uint(o.z) * 83492791u);
+    }
+    return mix(mix(mix(n[0], n[1], u.x), mix(n[2], n[3], u.x), u.y), mix(mix(n[4], n[5], u.x), mix(n[6], n[7], u.x), u.y), u.z);
+}
+
+vec3 flow(vec3 p) {
+    return vec3(vnoise(p), vnoise(p + vec3(31.7, 7.3, 11.1)), vnoise(p + vec3(-13.9, 41.3, 23.7))) * 2.0 - 1.0;
+}
+
+// ---- the shapes ----
+// A box's least half-side as the liquid has it: never thinner than a little (a wing, an arrow's planes, a baby's leg
+// are there too).
+const float THINNEST = 0.012;
+
+// A box's distance (its edges rounded by `r`, never past most of its least half-side: a thin part keeps its body): `c`
+// its middle, `a` its half-sides as vectors.
+float box_sd(vec3 p, vec3 c, vec3 ax, vec3 ay, vec3 az, float r) {
+    vec3 d = p - c;
+    vec3 len = vec3(length(ax), length(ay), length(az));
+    // a flat side (an arrow's planes, a wing) has no way of its own: across its other two (with none, a point's
+    // distance along it would always be nothing — the plane endless that way)
+    vec3 ux = len.x > 1e-6 ? ax / len.x : normalize(cross(ay, az) + 1e-9);
+    vec3 uy = len.y > 1e-6 ? ay / len.y : normalize(cross(az, ax) + 1e-9);
+    vec3 uz = len.z > 1e-6 ? az / len.z : normalize(cross(ax, ay) + 1e-9);
+    vec3 l = vec3(dot(d, ux), dot(d, uy), dot(d, uz));
+    len = max(len, vec3(THINNEST));
+    r = min(r, 0.8 * min(len.x, min(len.y, len.z)));
+    vec3 q = abs(l) - len + r;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+}
+
+// A box's middle half-side (of its three): how large a part it is — an arrow's plane small, a trunk large.
+float box_size(uint i) {
+    vec3 l = vec3(length(Boxes[i * 4u + 1u].xyz), length(Boxes[i * 4u + 2u].xyz), length(Boxes[i * 4u + 3u].xyz));
+    return max(max(min(l.x, l.y), min(max(l.x, l.y), l.z)), THINNEST);
+}
+
+// A box's least half-side (as box_sd has it).
+float box_thin(uint i) {
+    return max(min(length(Boxes[i * 4u + 1u].xyz), min(length(Boxes[i * 4u + 2u].xyz), length(Boxes[i * 4u + 3u].xyz))), THINNEST);
+}
+
+// A box's place from the anchor (the boxes come from the camera).
+vec3 box_mid(uint i) {
+    return Boxes[i * 4u].xyz + Cam.xyz;
+}
+
+float box_light(uint i) {
+    return max(Boxes[i * 4u + 1u].w, Boxes[i * 4u + 2u].w * mix(0.16, 1.0, Horizon.w));
+}
+
+// A face's way out along the half-side `a` (its side `s`): along it, or, the box flat that way (a wing, a fin), across
+// its other two.
+vec3 face_out(vec3 a, vec3 b, vec3 c, float s) {
+    vec3 n = dot(a, a) > 1e-12 ? a : cross(b, c);
+    return dot(n, n) > 1e-12 ? normalize(n) * (s < 0.0 ? -1.0 : 1.0) : vec3(0.0, 1.0, 0.0);
+}
+
+// The body's distance at p (the boxes alone, a plain union) and the nearest box.
+float body_sd(vec3 p, out uint nearest) {
+    float d = 1e9;
+    nearest = 0u;
+    uint n = min(uint(Info.y), MOST_BOXES);
+    for (uint i = 0u; i < n; i++) {
+        float b = box_sd(p, box_mid(i), Boxes[i * 4u + 1u].xyz, Boxes[i * 4u + 2u].xyz, Boxes[i * 4u + 3u].xyz, 0.02);
+        if (b < d) {
+            d = b;
+            nearest = i;
+        }
+    }
+    return d;
+}
+
+vec3 body_normal(vec3 p) {
+    uint k;
+    const float e = 0.01;
+    return normalize(vec3(body_sd(p + vec3(e, 0, 0), k) - body_sd(p - vec3(e, 0, 0), k), body_sd(p + vec3(0, e, 0), k) - body_sd(p - vec3(0, e, 0), k),
+                          body_sd(p + vec3(0, 0, e), k) - body_sd(p - vec3(0, 0, e), k)) + 1e-6);
+}
+
+// ---- the world ----
+// Whether a place (blocks from the anchor) is in a block (the engine's voxel window; outside it, not), and that
+// block's top there.
+bool solid_at(vec3 p, out float top) {
+    top = 0.0;
+    if (Flags.z < 0.5) {
+        return false;
+    }
+    vec3 w = vec3(Anchor.xyz) + p;
+    ivec3 b = ivec3(floor(w));
+    ivec3 r = b - Window.xyz;
+    if (r.x < 0 || r.z < 0 || r.y < 0 || r.x >= Window.w || r.z >= Window.w || r.y >= WindowSize.x) {
+        return false;
+    }
+    uint v = texelFetch(CursedVoxels, ivec3(b.x & 255, b.z & 255, b.y - Window.y), 0).r & 15u;
+    float fy = w.y - float(b.y);
+    float y0 = float(b.y - Anchor.y);
+    if (v == 1u || v == 5u || v == 8u || v == 11u) {
+        top = y0 + 1.0;
+        return true;
+    }
+    if (v == 2u && fy < 0.5) {
+        top = y0 + 0.5;
+        return true;
+    }
+    if (v == 3u && fy >= 0.5) {
+        top = y0 + 1.0;
+        return true;
+    }
+    return false;
+}
+
+// ---- stage 0: the drops ----
+void splash(Drop d, uint seed) {
+    if (Flags.x < 0.5) {
+        return;
+    }
+    uint n = 3u + uint(hash1(seed) * 3.0);
+    for (uint k = 0u; k < n; k++) {
+        uint i = MAIN_DROPS + atomicAdd(counters[0], 1u) % SPLASH_DROPS;
+        vec3 h = hash3(seed + k * 31u + 7u);
+        float a = h.x * 6.2831853;
+        float up = mix(1.0, 2.6, h.y) / sqrt(max(Motion.x, 0.2));
+        Drop s;
+        s.pos = vec4(d.pos.xyz + vec3(0.0, d.pos.w * 0.3, 0.0), d.pos.w * mix(0.22, 0.42, h.z));
+        s.vel = vec4(cos(a) * up * 0.55, up, sin(a) * up * 0.55, 0.0);
+        s.info = vec4(0.9, 4.0, float(hash_u(seed + k) & 0xffffu), d.info.w);
+        drops[i] = s;
+    }
+}
+
+void step_drop(uint i) {
+    Drop d = drops[i];
+    float dt = Cam.w;
+    float t = Info.x;
+    uint boxes = min(uint(Info.y), MOST_BOXES);
+    d.pos.xyz -= Shift.xyz;
+    float thick = Motion.x;
+    float heavy = Motion.y;
+    if (i >= MAIN_DROPS) {
+        // a splash's droplet: thrown up, falling, gone where it lands
+        if (d.pos.w > 0.0) {
+            d.vel.w += dt;
+            d.vel.y -= 9.0 * heavy * dt;
+            d.vel.xyz *= exp(-dt * 0.6 * thick);
+            d.pos.xyz += d.vel.xyz * dt;
+            float top;
+            if (d.vel.w > d.info.x || (d.vel.y < 0.0 && solid_at(d.pos.xyz - vec3(0.0, d.pos.w * 0.5, 0.0), top))) {
+                d.pos.w = 0.0;
+            }
+        }
+        drops[i] = d;
+        return;
+    }
+    uint live = uint(Look.x);
+    bool wanted = i < live && boxes > 0u && More.y > 0.5;
+    if (!wanted) {
+        // none: what there is shrinks into nothing
+        d.pos.w = max(d.pos.w - dt * 0.4, 0.0);
+        if (d.pos.w <= 0.0) {
+            d.vel.w = -hash1(i * 31u + uint(t * 60.0)) * 1.5;
+        }
+        drops[i] = d;
+        return;
+    }
+    d.vel.w += dt;
+    if (d.vel.w < 0.0) {
+        drops[i] = d;
+        return;
+    }
+    uint seed = hash_u(uint(d.info.z) + i * 977u);
+    if (d.pos.w <= 0.0) {
+        // out of the body's surface: a box by chance (each as likely as its surface is large: an arrow's few drops, a
+        // trunk's many), a place on one of its faces
+        uint b = boxes - 1u;
+        float pick = hash1(seed);
+        for (uint k = 0u; k < boxes; k++) {
+            if (pick <= Boxes[k * 4u + 3u].w) {
+                b = k;
+                break;
+            }
+        }
+        vec3 c = box_mid(b);
+        vec3 ax = Boxes[b * 4u + 1u].xyz;
+        vec3 ay = Boxes[b * 4u + 2u].xyz;
+        vec3 az = Boxes[b * 4u + 3u].xyz;
+        vec3 r = hash3(seed + 5u) * 2.0 - 1.0;
+        int face = int(hash1(seed + 9u) * 3.0);
+        if (face == 0) r.x = sign(r.x + 1e-3);
+        else if (face == 1) r.y = sign(r.y + 1e-3);
+        else r.z = sign(r.z + 1e-3);
+        vec3 p = c + ax * r.x + ay * r.y + az * r.z;
+        vec3 n = face == 0 ? face_out(ax, ay, az, r.x) : face == 1 ? face_out(ay, az, ax, r.y) : face_out(az, ax, ay, r.z);
+        // many small, a few large
+        // many small, a few large: never larger than the part they come off allows (an arrow's are specks)
+        float sz = min(mix(0.012, 0.1, pow(hash1(seed + 13u), 4.0)) * Look.y, box_size(b) * 0.6);
+        d.pos = vec4(p - n * sz * 0.5, sz);
+        d.vel = vec4(n * mix(0.6, 2.4, hash1(seed + 17u)) * mix(0.6, 1.4, Look.w) * Motion.z, 0.0);
+        // how long it stays out; some fall instead of coming back (the heavier, the more)
+        d.info.x = mix(1.2, 4.0, hash1(seed + 19u)) / mix(0.6, 1.6, Motion.w * 0.5);
+        d.info.y = hash1(seed + 23u) < clamp(0.1 * heavy, 0.02, 0.4) ? 2.0 : 0.0;
+        d.info.w = box_light(b);
+        drops[i] = d;
+        return;
+    }
+    vec3 p = d.pos.xyz;
+    uint nb;
+    float sd = body_sd(p, nb);
+    float restless = Look.w;
+    float state = d.info.y;
+    if (state < 1.5) {
+        vec3 n = body_normal(p);
+        vec3 acc = vec3(0.0);
+        // out: drawn to a shell round the body (its own distance), swirling round it; back: drawn in
+        // the shell no further out than the part it swirls round is large (a small thing's drops keep close to it)
+        float reach_out = min((0.07 + 0.22 * restless * hash1(seed + 29u)) * Motion.z, box_size(nb) * 1.4 + 0.02);
+        float shell = state > 0.5 ? -d.pos.w : reach_out + d.pos.w;
+        acc += -n * (sd - shell) * 32.0 * (state > 0.5 ? mix(0.7, 1.6, Motion.w * 0.5) : 1.0);
+        vec3 mid = box_mid(nb);
+        vec3 out_ = p - mid;
+        out_.y = 0.0;
+        vec3 round_ = normalize(cross(vec3(0.0, 1.0, 0.0), out_ + 1e-4));
+        acc += round_ * (1.6 + 1.4 * hash1(seed + 31u)) * restless * (state > 0.5 ? 0.3 : 1.0);
+        // a tremble: a flow of noise through space
+        acc += flow(p * 2.3 + vec3(0.0, t * 0.7, t * 0.4)) * 4.5 * restless;
+        acc.y -= 0.8 * heavy;
+        d.vel.xyz += acc * dt;
+        d.vel.xyz *= exp(-dt * 3.2 * mix(0.7, 1.5, thick * 0.5));
+        if (d.vel.w > d.info.x && state < 0.5) {
+            d.info.y = 1.0;
+        }
+        d.info.w = mix(d.info.w, box_light(nb), 1.0 - exp(-dt * 4.0));
+        // back in: sunk into the body, gone (and out again later)
+        if (state > 0.5 && sd < -d.pos.w * 0.6) {
+            d.pos.w = 0.0;
+            d.vel.w = -hash1(seed + 37u) * 0.6;
+            d.info.z = float(hash_u(uint(d.info.z) + 1013904223u) & 0xffffu);
+        }
+    } else if (state < 2.5) {
+        // falling: the world's pull, a little air; on the ground it splashes
+        d.vel.y -= 9.0 * heavy * dt;
+        d.vel.xyz *= exp(-dt * 0.4 * thick);
+        float top;
+        if (d.vel.y < 0.0 && solid_at(p - vec3(0.0, d.pos.w * 0.4, 0.0), top)) {
+            splash(d, seed + uint(t * 97.0));
+            d.pos.y = top + d.pos.w * 0.35;
+            d.vel.xyz = vec3(0.0);
+            d.info.y = 3.0;
+            d.info.x = d.vel.w;
+        } else if (d.vel.w > d.info.x + 3.0) {
+            d.pos.w = 0.0;
+            d.vel.w = -hash1(seed + 41u) * 0.8;
+            d.info.z = float(hash_u(uint(d.info.z) + 1013904223u) & 0xffffu);
+        }
+    } else {
+        // on the ground: crawling back over it to the nearest body and up into it, or lying and drying away
+        float lying = d.vel.w - d.info.x;
+        vec3 to = box_mid(nb) - p;
+        to.y = 0.0;
+        float far = length(to);
+        if (Flags.y > 0.5 && (lying > 9.0 || far > 10.0)) {
+            // its body gone too far (flown, ridden off): it dries away where it is
+            d.vel.xyz = vec3(0.0);
+            d.pos.w = max(d.pos.w - dt * 0.05, 0.0);
+            if (d.pos.w <= 0.004) {
+                d.pos.w = 0.0;
+                d.vel.w = -hash1(seed + 47u) * 0.8;
+                d.info.z = float(hash_u(uint(d.info.z) + 1013904223u) & 0xffffu);
+            }
+        } else if (Flags.y > 0.5) {
+            vec3 dir = to / max(far, 1e-4);
+            float speed = 0.6 * Motion.w / sqrt(max(thick, 0.2)) * smoothstep(0.0, 0.5, lying);
+            vec3 next = p + dir * speed * dt;
+            float top;
+            if (far < 0.35 || solid_at(next + vec3(0.0, d.pos.w * 0.2, 0.0), top)) {
+                // at the body's feet (or a wall): up into it
+                d.info.y = 1.0;
+                d.vel.xyz = vec3(0.0, 1.2, 0.0) + dir * 0.4;
+            } else if (!solid_at(next - vec3(0.0, d.pos.w * 0.35 + 0.08, 0.0), top)) {
+                // over an edge: falling again
+                d.info.y = 2.0;
+                d.vel.xyz = dir * speed;
+            } else {
+                d.vel.xyz = dir * speed;
+                d.pos.xz = next.xz;
+            }
+        } else {
+            d.vel.xyz = vec3(0.0);
+            d.pos.w = max(d.pos.w - dt * 0.02 * smoothstep(1.5, 3.0, lying), 0.0);
+            if (lying > 4.5) {
+                d.pos.w = 0.0;
+                d.vel.w = -hash1(seed + 43u) * 0.8;
+                d.info.z = float(hash_u(uint(d.info.z) + 1013904223u) & 0xffffu);
+            }
+        }
+    }
+    if (d.pos.w > 0.0) {
+        if (d.info.y < 2.5) {
+            d.pos.xyz += d.vel.xyz * dt;
+        }
+        // too far from any body (left behind): it goes
+        if (sd > 3.0 && d.info.y < 1.5) {
+            d.pos.w = max(d.pos.w - dt * 0.3, 0.0);
+        }
+    }
+    drops[i] = d;
+}
+
+// ---- stage 1: into the tiles ----
+// The rectangle (pixels) a sphere covers: x0 y0 x1 y1 (x0 > x1: none).
+vec4 screen_rect(vec3 c, float r) {
+    vec4 ndc = ViewProj * vec4(c, 1.0);
+    if (ndc.w < r + 0.05) {
+        // behind the camera altogether: nowhere on the screen; across its plane (round the camera): all of it
+        return ndc.w < -r ? vec4(1.0, 1.0, 0.0, 0.0) : vec4(0.0, 0.0, Info.z, Info.w);
+    }
+    vec2 s = ndc.xy / ndc.w;
+    float k = max(length(ViewProj[0].xyz), length(ViewProj[1].xyz));
+    float rr = r * k / ndc.w;
+    vec2 lo = (s - rr) * 0.5 + 0.5;
+    vec2 hi = (s + rr) * 0.5 + 0.5;
+    return vec4(lo * Info.zw - 2.0, hi * Info.zw + 2.0);
+}
+
+// How far a body reaches past its boxes to join (the smooth union's reach), and a drop's own reach (its stretch).
+float join_reach() {
+    return 0.1 * Look.z + 0.02;
+}
+
+vec3 tail_of(Drop d) {
+    vec3 t = d.vel.xyz * (d.info.y > 3.5 ? 0.01 : 0.012 / max(Motion.x, 0.25));
+    float l = length(t);
+    float most = d.pos.w * 1.1;
+    return l > most ? t * (most / l) : t;
+}
+
+// Whether a box or drop is drawn at all: there, and the camera not in it (looking from inside a body: not seen from
+// there).
+bool drawn(uint prim) {
+    if (prim < MOST_BOXES) {
+        if (prim >= min(uint(Info.y), MOST_BOXES)) {
+            return false;
+        }
+        return box_sd(vec3(0.0), Boxes[prim * 4u].xyz, Boxes[prim * 4u + 1u].xyz, Boxes[prim * 4u + 2u].xyz, Boxes[prim * 4u + 3u].xyz, 0.055) >= 0.08;
+    }
+    Drop d = drops[prim - MOST_BOXES];
+    return d.pos.w > 0.0 && length(d.pos.xyz - Cam.xyz) >= d.pos.w * 1.6 + 0.05;
+}
+
+void bin(uint prim) {
+    if (!drawn(prim)) {
+        return;
+    }
+    vec4 r;
+    if (prim < MOST_BOXES) {
+        vec3 ax = Boxes[prim * 4u + 1u].xyz;
+        vec3 ay = Boxes[prim * 4u + 2u].xyz;
+        vec3 az = Boxes[prim * 4u + 3u].xyz;
+        r = screen_rect(Boxes[prim * 4u].xyz, length(abs(ax) + abs(ay) + abs(az)) + join_reach() + 0.03);
+    } else {
+        Drop d = drops[prim - MOST_BOXES];
+        vec3 tail = tail_of(d);
+        r = screen_rect(d.pos.xyz - Cam.xyz - tail * 0.5, d.pos.w * 1.6 + length(tail) * 0.5 + join_reach());
+    }
+    if (r.x > r.z) {
+        return;
+    }
+    r = vec4(max(r.xy, vec2(0.0)), min(r.zw, Info.zw - 1.0));
+    if (r.x > r.z || r.y > r.w) {
+        return;
+    }
+    uint tx = (uint(Info.z) + TILE - 1u) / TILE;
+    uint ty = (uint(Info.w) + TILE - 1u) / TILE;
+    uvec2 lo = uvec2(r.xy) / TILE;
+    uvec2 hi = min(uvec2(r.zw) / TILE, uvec2(tx - 1u, ty - 1u));
+    uint n_tiles = tx * ty;
+    for (uint y = lo.y; y <= hi.y; y++) {
+        for (uint x = lo.x; x <= hi.x; x++) {
+            uint tile = y * tx + x;
+            uint at = atomicAdd(tiles[tile], 1u);
+            if (at < PER_TILE) {
+                tiles[n_tiles + tile * PER_TILE + at] = prim;
+            }
+        }
+    }
+}
+
+// ---- stage 2: the ray ----
+// The pixel's own few of its tile's (those its ray passes near: when there are more, the nearest along it, whatever
+// order the tile has them in, so the same each frame), and how far along it they begin and end.
+const int MOST_NEAR = 48;
+uint near_ids[MOST_NEAR];
+float near_from[MOST_NEAR];
+int near_n;
+float seconds;
+
+// A primitive's distance at p (from the camera), and how thin it is (a box's least half-side, a drop's radius).
+float prim_sd(uint i, vec3 p, out float thin) {
+    if (i < MOST_BOXES) {
+        thin = box_thin(i);
+        vec3 c = Boxes[i * 4u].xyz;
+        float d = box_sd(p, c, Boxes[i * 4u + 1u].xyz, Boxes[i * 4u + 2u].xyz, Boxes[i * 4u + 3u].xyz, 0.055);
+        // its surface alive: slow waves running over it, more as it is restless, less as it is thick
+        vec3 w = (p + Cam.xyz) * 7.0;
+        d -= (sin(w.x + seconds * 2.1) * sin(w.y * 1.3 - seconds * 1.7) * sin(w.z + seconds * 1.3)) * 0.007 * Look.w / max(Motion.x, 0.4);
+        return d;
+    }
+    Drop q = drops[i - MOST_BOXES];
+    thin = q.pos.w;
+    vec3 c = q.pos.xyz - Cam.xyz;
+    if (q.info.y > 2.5 && q.info.y < 3.5) {
+        // on the ground: spread flat
+        vec3 rr = q.pos.w * vec3(1.55, 0.45, 1.55);
+        vec3 l = p - c;
+        float k0 = length(l / rr);
+        float k1 = length(l / (rr * rr));
+        return k0 * (k0 - 1.0) / max(k1, 1e-6);
+    }
+    // stretched along its way: from where it is back to where it was a moment ago
+    vec3 tail = tail_of(q);
+    vec3 pa = p - c;
+    float h = clamp(dot(pa, -tail) / max(dot(tail, tail), 1e-8), 0.0, 1.0);
+    return length(pa + tail * h) - q.pos.w * mix(1.0, 0.8, h);
+}
+
+// Two distances as one liquid's: their union, smoothed over `k` (a neck between two that come near).
+float smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
+// The liquid's distance at p: of the pixel's own, the two nearest joined as a liquid's surfaces join — the reach of
+// their neck as far as the merging lets, no further than the thinner of the two allows (an arrow stays as thin as it
+// is, a drop's neck to the body no wider than the drop); the same whatever order they come in.
+float liquid_sd(vec3 p) {
+    float d1 = 1e9;
+    float d2 = 1e9;
+    float t1 = 1.0;
+    float t2 = 1.0;
+    for (int j = 0; j < near_n; j++) {
+        float thin;
+        float d = prim_sd(near_ids[j], p, thin);
+        if (d < d1) {
+            d2 = d1;
+            t2 = t1;
+            d1 = d;
+            t1 = thin;
+        } else if (d < d2) {
+            d2 = d;
+            t2 = thin;
+        }
+    }
+    if (d2 > 1e8) {
+        return d1;
+    }
+    float k = min(0.09 * Look.z, 0.7 * min(t1, t2) + 0.004);
+    return smin(d1, d2, k);
+}
+
+vec3 liquid_normal(vec3 p, float t) {
+    float e = max(0.0012, t * 0.0008);
+    vec2 h = vec2(1.0, -1.0) * 0.5773;
+    return normalize(h.xyy * liquid_sd(p + h.xyy * e) + h.yyx * liquid_sd(p + h.yyx * e) + h.yxy * liquid_sd(p + h.yxy * e) + h.xxx * liquid_sd(p + h.xxx * e));
+}
+
+vec3 sky_seen(vec3 R) {
+    vec3 c = mix(Horizon.rgb * 1.05 + 0.04, Sky.rgb * 0.75, smoothstep(0.0, 0.7, R.y));
+    c += (Horizon.rgb + 0.12) * 0.45 * exp(-(R.y * R.y) / 0.012);
+    vec3 ground = mix(Horizon.rgb * 0.4 + 0.03, Horizon.rgb * 0.15 + 0.02, smoothstep(-0.04, -0.6, R.y));
+    c = mix(c, ground, smoothstep(0.015, -0.06, R.y));
+    if (Sun.w > 0.0) {
+        c += SunColor.rgb * pow(max(dot(R, Sun.xyz), 0.0), 1200.0) * 26.0 * Sun.w;
+    }
+    return c;
+}
+
+vec3 to_linear(vec3 c) {
+    return pow(c, vec3(2.2));
+}
+
+vec3 to_srgb(vec3 c) {
+    return pow(max(c, 0.0), vec3(1.0 / 2.2));
+}
+
+// A place from the camera on the screen (0..1), and how far it is.
+vec3 to_screen(vec3 p) {
+    vec4 c = ViewProj * vec4(p, 1.0);
+    if (c.w <= 1e-4) {
+        return vec3(-1.0);
+    }
+    return vec3(c.xy / c.w * 0.5 + 0.5, c.w);
+}
+
+// How far the frame's surface is along the view at a place on the screen (0 the sky: far).
+float scene_far(vec2 uv) {
+    float dz = textureLod(Depth, uv, 0.0).r;
+    if (dz <= 0.0) {
+        return 1e6;
+    }
+    vec4 wp = InvViewProj * vec4(uv * 2.0 - 1.0, dz, 1.0);
+    return length(wp.xyz / wp.w);
+}
+
+// The frame along a ray from p (from the camera), stepping on until the ray goes behind what the frame shows: where on
+// the screen it met it, and how sure (0: it went off the screen or met nothing).
+vec3 trace_screen(vec3 p, vec3 dir, int steps, float reach) {
+    float step_ = reach / float(steps);
+    float s = step_ * 0.6;
+    vec2 last = vec2(-1.0);
+    for (int k = 0; k < steps; k++) {
+        vec3 q = p + dir * s;
+        vec3 sc = to_screen(q);
+        if (sc.z < 0.0 || any(lessThan(sc.xy, vec2(0.0))) || any(greaterThan(sc.xy, vec2(1.0)))) {
+            break;
+        }
+        float f = scene_far(sc.xy);
+        float d = length(q);
+        if (d > f && d - f < max(0.35, s * 0.6)) {
+            vec2 e = min(sc.xy, 1.0 - sc.xy);
+            return vec3(sc.xy, smoothstep(0.0, 0.08, min(e.x, e.y)));
+        }
+        last = sc.xy;
+        s += step_ * (1.0 + float(k) * 0.12);
+    }
+    return vec3(last, 0.0);
+}
+
+// The frame round a place on the screen, blurred as wide as the surface is rough.
+vec3 behind_at(vec2 uv, float blur) {
+    vec3 c = to_linear(textureLod(Behind, clamp(uv, vec2(0.001), vec2(0.999)), 0.0).rgb);
+    if (blur < 0.5) {
+        return c;
+    }
+    vec2 px = blur / Info.zw;
+    for (int k = 0; k < 6; k++) {
+        float a = float(k) * 1.0472 + 0.5;
+        c += to_linear(textureLod(Behind, clamp(uv + vec2(cos(a), sin(a)) * px, vec2(0.001), vec2(0.999)), 0.0).rgb);
+    }
+    return c / 7.0;
+}
+
+// The rainbow of a thin film over it: its colours as the film's thickness (a little uneven) shows them at this angle.
+vec3 film(float cosv, vec3 p) {
+    float th = cosv * 2.2 + vnoise(p * 6.0 + seconds * 0.15) * 0.9;
+    return 0.5 + 0.5 * cos(6.2831853 * (th + vec3(0.0, 0.33, 0.67)));
+}
+
+// The bubbles in it along its inside from a to b (blocks from the camera; on the body's own coordinates `o` so they
+// move with it), as how much of their bright rims the ray passes.
+float bubbles_along(vec3 a, vec3 b, vec3 o) {
+    float sum = 0.0;
+    for (int k = 0; k < 7; k++) {
+        vec3 p = mix(a, b, (float(k) + 0.5) / 7.0) - o;
+        vec3 q = p * 13.0;
+        uint cid = uint(int(floor(q.x)) * 73856093) ^ uint(int(floor(q.z)) * 83492791);
+        float rise = seconds * (1.4 + 1.6 * hash1(cid));
+        q.y -= rise;
+        vec3 cell = floor(q);
+        uint id = uint(int(cell.x) * 73856093) ^ uint(int(cell.y) * 19349663) ^ uint(int(cell.z) * 83492791);
+        if (hash1(id) > 0.16 * Rim.w) {
+            continue;
+        }
+        vec3 f = fract(q) - 0.5 - (hash3(id + 3u) - 0.5) * 0.5;
+        float r = mix(0.08, 0.2, hash1(id + 9u));
+        float d = length(f) - r;
+        sum += smoothstep(0.08, 0.0, abs(d)) * 0.6 + smoothstep(0.0, -r, d) * 0.15;
+    }
+    return sum;
+}
+
+// The most steps of the ray, by the quality.
+int quality_steps() {
+    return More.z > 2.5 ? 128 : More.z > 1.5 ? 100 : More.z > 0.5 ? 80 : 64;
+}
+
+void march(ivec2 px) {
+    vec2 size = Info.zw;
+    if (px.x >= int(size.x) || px.y >= int(size.y)) {
+        return;
+    }
+    uint tx = (uint(size.x) + TILE - 1u) / TILE;
+    uint ty = (uint(size.y) + TILE - 1u) / TILE;
+    uint tile = uint(px.y) / TILE * tx + uint(px.x) / TILE;
+    uint count = tiles[tile];
+    if (count == 0u) {
+        return;
+    }
+    // a tile whose list overflowed: all of them, whatever was left out of it
+    bool every = count > PER_TILE;
+    uint n = every ? MOST_BOXES + MOST_DROPS : count;
+    uint list = tx * ty + tile * PER_TILE;
+    seconds = Info.x;
+    vec2 uv = (vec2(px) + 0.5) / size;
+    float dz = textureLod(Depth, (vec2(px) + 0.5) / size, 0.0).r;
+    vec4 wp = InvViewProj * vec4(uv * 2.0 - 1.0, max(dz, 1e-7), 1.0);
+    vec3 scene = wp.xyz / wp.w;
+    float far = dz <= 0.0 ? 1e6 : length(scene);
+    vec3 rd = normalize(scene);
+    // (from points far out along the rays: ones a tenth of a block out the view's bob turned)
+    vec4 wp2 = InvViewProj * vec4((uv + vec2(1.0 / size.x, 0.0)) * 2.0 - 1.0, 1e-7, 1.0);
+    vec4 wp1 = InvViewProj * vec4(uv * 2.0 - 1.0, 1e-7, 1.0);
+    float pa = length(normalize(wp2.xyz / wp2.w) - normalize(wp1.xyz / wp1.w));
+    // the ones the ray passes near (their bounding spheres, the joining reach round them), and the stretch of the ray
+    // they span
+    float reach = join_reach();
+    float t0 = 1e9;
+    float t1 = 0.0;
+    near_n = 0;
+    for (uint j = 0u; j < n; j++) {
+        uint i = every ? j : tiles[list + j];
+        if (every && !drawn(i)) {
+            continue;
+        }
+        vec3 c;
+        float r;
+        if (i < MOST_BOXES) {
+            vec3 ax = Boxes[i * 4u + 1u].xyz;
+            vec3 ay = Boxes[i * 4u + 2u].xyz;
+            vec3 az = Boxes[i * 4u + 3u].xyz;
+            c = Boxes[i * 4u].xyz;
+            r = length(abs(ax) + abs(ay) + abs(az)) + reach + 0.03;
+        } else {
+            Drop q = drops[i - MOST_BOXES];
+            vec3 tail = tail_of(q);
+            c = q.pos.xyz - Cam.xyz - tail * 0.5;
+            r = q.pos.w * 1.6 + length(tail) * 0.5 + reach;
+        }
+        float b = dot(c, rd);
+        float h = dot(c, c) - b * b;
+        float rr = r + pa * b * 1.5;
+        if (h > rr * rr) {
+            continue;
+        }
+        float w = sqrt(rr * rr - h);
+        if (b + w < 0.0) {
+            continue;
+        }
+        float from = max(b - w, 0.02);
+        if (near_n < MOST_NEAR) {
+            near_ids[near_n] = i;
+            near_from[near_n] = from;
+            near_n++;
+        } else {
+            // full: in place of the farthest, when this one is nearer (ties to the lower number)
+            int worst = 0;
+            for (int k = 1; k < MOST_NEAR; k++) {
+                if (near_from[k] > near_from[worst] || (near_from[k] == near_from[worst] && near_ids[k] > near_ids[worst])) {
+                    worst = k;
+                }
+            }
+            if (from < near_from[worst] || (from == near_from[worst] && i < near_ids[worst])) {
+                near_ids[worst] = i;
+                near_from[worst] = from;
+            } else {
+                continue;
+            }
+        }
+        t0 = min(t0, from);
+        t1 = max(t1, b + w);
+    }
+    if (near_n == 0) {
+        return;
+    }
+    t1 = min(t1, min(far, 96.0));
+    float t = t0;
+    float hit = -1.0;
+    // the nearest the ray came, in pixels (for the silhouette's smoothing)
+    float close_px = 1e9;
+    float close = 1e9;
+    float close_t = 0.0;
+    int most = quality_steps();
+    for (int s = 0; s < most; s++) {
+        vec3 p = rd * t;
+        float d = liquid_sd(p);
+        float dpx = d / max(pa * t, 1e-6);
+        if (dpx < close_px) {
+            close_px = dpx;
+            close = d;
+            close_t = t;
+        }
+        if (d < max(0.0005, t * 0.00035)) {
+            hit = t;
+            break;
+        }
+        t += max(d * 0.9, 0.0006);
+        if (t > t1) {
+            break;
+        }
+    }
+    float cover = 1.0;
+    if (hit < 0.0) {
+        // missed by less than a pixel: its edge, as much as it covers
+        float pw = pa * close_t;
+        if (close_t <= 0.0 || close > pw) {
+            return;
+        }
+        cover = clamp(1.0 - close / max(pw, 1e-6), 0.0, 1.0);
+        hit = close_t;
+        if (cover <= 0.01) {
+            return;
+        }
+    }
+    vec3 p = rd * hit;
+    vec3 N = liquid_normal(p, hit);
+    if (dot(N, -rd) < 0.0) {
+        N = normalize(N - rd * dot(N, rd) * 1.01);
+    }
+    // its surface alive: a fine ripple running over it, finer and stronger as it is thinner and more restless
+    {
+        vec3 w = (p + Cam.xyz) * 11.0 + vec3(0.0, seconds * 1.3, seconds * 0.7);
+        float e = 0.05;
+        float n0 = vnoise(w);
+        vec3 g = vec3(vnoise(w + vec3(e, 0.0, 0.0)) - n0, vnoise(w + vec3(0.0, e, 0.0)) - n0, vnoise(w + vec3(0.0, 0.0, e)) - n0) / e;
+        N = normalize(N + (g - N * dot(g, N)) * 0.03 * Look.w / max(Motion.x, 0.4));
+    }
+    // the light here: the nearest body's
+    float light = 1.0;
+    vec3 origin = vec3(0.0);
+    {
+        float best = 1e9;
+        for (int j = 0; j < near_n; j++) {
+            uint i = near_ids[j];
+            float thin;
+            float d = prim_sd(i, p, thin);
+            if (d < best) {
+                best = d;
+                if (i < MOST_BOXES) {
+                    light = box_light(i);
+                    origin = Boxes[i * 4u].xyz;
+                } else {
+                    light = drops[i - MOST_BOXES].info.w;
+                }
+            }
+        }
+    }
+    float lit = mix(0.07, 1.0, light * light);
+    float quality = More.z;
+    vec3 V = -rd;
+    float cosv = clamp(dot(N, V), 0.0, 1.0);
+    float rough = clamp(More.w, 0.0, 1.0);
+    float metal = clamp(Shift.w, 0.0, 1.0);
+    float clear = clamp(Tint.w, 0.0, 1.0);
+    float eta = 1.0 + 0.33 * Deep.w;
+    float f0d = pow((eta - 1.0) / (eta + 1.0), 2.0);
+    vec3 F0 = mix(vec3(f0d), Tint.rgb, metal);
+    vec3 F = F0 + (1.0 - F0) * pow(1.0 - cosv, 5.0) * mix(1.0, 0.45, rough);
+    // what it mirrors: the frame along the reflection, the sky past it (dimmed by the light here)
+    vec3 R = reflect(rd, N);
+    vec3 env = sky_seen(R) * lit;
+    if (quality > 0.5) {
+        vec3 hitp = trace_screen(p + N * 0.01, R, quality > 2.5 ? 28 : quality > 1.5 ? 20 : 12, 7.0);
+        if (hitp.z > 0.0) {
+            env = mix(env, behind_at(hitp.xy, rough * 26.0), hitp.z);
+        }
+    }
+    env *= mix(vec3(1.0), Rim.rgb * 1.25, pow(1.0 - cosv, 3.0) * 0.7);
+    if (Shine.w > 0.0) {
+        env *= mix(vec3(1.0), film(cosv, p + Cam.xyz) * 1.7, Shine.w * 0.85);
+    }
+    vec3 mirror = env * F * More.x;
+    // what comes through it: in along the bent ray, out where it leaves, on to what is behind; its depth takes the
+    // light toward its depth's colour; the colours split a little
+    vec3 through = vec3(0.0);
+    if (metal < 0.999) {
+        vec3 Tin = refract(rd, N, 1.0 / eta);
+        if (dot(Tin, Tin) < 1e-6) {
+            Tin = rd;
+        }
+        float ti = 0.004;
+        for (int s = 0; s < 16; s++) {
+            float d = -liquid_sd(p + Tin * ti);
+            if (d < 0.001) {
+                break;
+            }
+            ti += max(d, 0.008);
+        }
+        vec3 pe = p + Tin * ti;
+        vec3 Ne = liquid_normal(pe, hit + ti);
+        vec3 Tout = refract(Tin, -Ne, eta);
+        if (dot(Tout, Tout) < 1e-6) {
+            Tout = reflect(Tin, -Ne);
+        }
+        vec3 seen;
+        vec2 base_uv;
+        if (quality > 0.5) {
+            vec3 h = trace_screen(pe, Tout, quality > 2.5 ? 16 : 10, 4.0);
+            vec3 fall = to_screen(pe + Tout * min(max(far - hit, 0.3), 3.0));
+            base_uv = h.z > 0.0 ? h.xy : (fall.z > 0.0 ? fall.xy : uv);
+        } else {
+            vec3 fall = to_screen(pe + Tout * 1.0);
+            base_uv = fall.z > 0.0 ? fall.xy : uv;
+        }
+        vec2 bend = base_uv - uv;
+        float blur = rough * 18.0;
+        if (quality > 2.5 && Deep.w > 0.05) {
+            seen = vec3(behind_at(uv + bend * 0.985, blur).r, behind_at(uv + bend, blur).g, behind_at(uv + bend * 1.018, blur).b);
+        } else {
+            seen = behind_at(uv + bend, blur);
+        }
+        vec3 deep = clamp(Deep.rgb, vec3(0.004), vec3(0.996));
+        vec3 sigma = -log(deep) * (0.25 + 6.0 * (1.0 - clear));
+        vec3 T = exp(-sigma * ti) * clear;
+        // what it holds lit inside: its own colour where it lets little through
+        vec3 ambient = Sky.rgb * 0.45 + Horizon.rgb * 0.2 + 0.02;
+        vec3 inner = Tint.rgb * (ambient + max(dot(N, Sun.xyz), 0.0) * Sun.w * SunColor.rgb * 0.7) * lit;
+        through = seen * T * mix(vec3(1.0), Tint.rgb * 1.15, 0.3) + inner * (1.0 - clamp(T, 0.0, 1.0)) * (1.0 - clear * 0.6);
+        if (Rim.w > 0.0 && quality > 1.5) {
+            through += (env * 0.6 + Shine.rgb * 0.15) * bubbles_along(p, pe, origin) * T * 0.8;
+        }
+        through *= 1.0 - F * More.x * 0.9;
+    }
+    vec3 col = mix(through + mirror, mirror, metal);
+    // the sun's highlight (a microfacet's): sharp on a smooth surface, wide and dim on a rough one
+    if (Sun.w > 0.0) {
+        vec3 L = Sun.xyz;
+        vec3 H = normalize(L + V);
+        float nh = max(dot(N, H), 0.0);
+        float nl = max(dot(N, L), 0.0);
+        float a2 = max(rough * rough, 0.0025);
+        a2 *= a2;
+        float dd = nh * nh * (a2 - 1.0) + 1.0;
+        float D = a2 / (3.14159 * dd * dd);
+        vec3 spec = D * F * nl / max(4.0 * cosv * nl + 0.05, 0.05);
+        if (Shine.w > 0.0) {
+            spec *= mix(vec3(1.0), film(cosv, p + Cam.xyz) * 1.6, Shine.w * 0.7);
+        }
+        col += min(spec, vec3(40.0)) * Shine.rgb * SunColor.rgb * Sun.w * 0.25 * light;
+    }
+    vec4 c4 = imageLoad(Canvas, px);
+    vec3 under = to_linear(c4.rgb);
+    imageStore(Canvas, px, vec4(to_srgb(mix(under, col, cover)), c4.a));
+}
+
+void main() {
+    if (Stage == 0) {
+        // the splashes' droplets (before the drops: those they let go now are stepped from the next frame)
+        uint i = gl_GlobalInvocationID.x;
+        if (i >= MAIN_DROPS && i < MOST_DROPS) {
+            step_drop(i);
+        }
+    } else if (Stage == 3) {
+        uint i = gl_GlobalInvocationID.x;
+        if (i < MAIN_DROPS) {
+            step_drop(i);
+        }
+    } else if (Stage == 1) {
+        uint i = gl_GlobalInvocationID.x;
+        if (i < MOST_BOXES + MOST_DROPS) {
+            bin(i);
+        }
+    } else {
+        // (dispatched as 64 a group, the groups across and down the frame: a group 8 by 8 pixels)
+        uvec2 base = gl_WorkGroupID.xy * 8u;
+        uint l = gl_LocalInvocationID.x;
+        march(ivec2(base + uvec2(l % 8u, l / 8u)));
+    }
+}

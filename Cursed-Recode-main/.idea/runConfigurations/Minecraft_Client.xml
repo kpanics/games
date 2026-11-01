@@ -1,0 +1,16 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Minecraft Client" type="Application" factoryName="Application" singleton="true">
+    <option name="MAIN_CLASS_NAME" value="cursed.recode.dev.IdeaBoot" />
+    <module name="cursed-recode" />
+    <option name="PROGRAM_PARAMETERS" value="--username Dev --assetIndex 34 --assetsDir $USER_HOME$/AppData/Roaming/.minecraft/assets --gameDir . --versionType &quot;Cursed Recode&quot;" />
+    <option name="VM_PARAMETERS" value="-Xmx4G -Xss1M -XX:StackShadowPages=32 --enable-native-access=ALL-UNNAMED --add-exports java.base/jdk.internal.misc=ALL-UNNAMED -Dfabric.development=true -Dfabric.log.disableAnsi=false -Dlog4j2.formatMsgNoLookups=true &quot;-Dlog4j.configurationFile=$PROJECT_DIR$/tools/log4j2-dev.xml&quot;" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/run" />
+    <envs>
+      <env name="CURSED_DEV_COSMETICS" value="D:\CS2\work\out" />
+    </envs>
+    <shortenClasspath name="ARGS_FILE" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>
