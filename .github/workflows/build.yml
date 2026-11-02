@@ -292,7 +292,16 @@ jobs:
       timeout-minutes: 30
       run: |
         mkdir -p "$HOME/test-home"
-        linux-loader/target/release/cursed-linux-loader --home "$HOME/test-home" --sync-only
+        # склад dist-objects появляется после джобы dist (на main); на PR его ещё нет - берём
+        # прежний dist. В любой момент хотя бы один из двух существует (публикация сначала создаёт
+        # склад, потом меняет витрину).
+        BASE_TEST="https://github.com/kpanics/games/releases/download/dist-objects"
+        if ! curl -fsIL "$BASE_TEST/start.json" -o /dev/null; then
+          BASE_TEST="https://github.com/kpanics/games/releases/download/dist"
+          curl -fsIL "$BASE_TEST/start.json" -o /dev/null || { echo "нет ни dist-objects, ни dist"; exit 1; }
+          echo "тест против прежнего релиза dist (dist-objects ещё не опубликован)"
+        fi
+        linux-loader/target/release/cursed-linux-loader --home "$HOME/test-home" --base "$BASE_TEST" --sync-only
         du -sh "$HOME/test-home"
         test -f "$HOME/test-home/bin/CursedRecode.exe" || { echo "нет бинарей"; exit 1; }
         test -d "$HOME/test-home/runtime/bin" || { echo "runtime не распакован"; exit 1; }
