@@ -757,7 +757,7 @@ impl ApplicationHandler<Ticker> for App {
                 std::process::exit(1);
             }
         };
-        let mut surface = match softbuffer::Surface::new(&context, window) {
+        let surface = match softbuffer::Surface::new(&context, window) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("softbuffer: {e}");
@@ -874,7 +874,7 @@ fn main() {
     }
     let app = App { ui, draw: None };
 
-    let event_loop = winit::event_loop::EventLoopBuilder::<Ticker>::with_user_event().build().expect("событийный цикл");
+    let event_loop = EventLoop::<Ticker>::with_user_event().build().expect("событийный цикл");
     let proxy = event_loop.create_proxy();
     std::thread::spawn(move || {
         let mut n = 0u64;
