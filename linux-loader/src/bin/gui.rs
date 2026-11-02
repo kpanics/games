@@ -1085,7 +1085,7 @@ impl Ui {
         } else {
             self.t("Вход не обязателен: без него игрок — «Player».", "Signing in is optional: without it the player is \"Player\".")
         };
-        self.txtext.draw(can, F::Reg, 13.0, x0, by + 140.0, DIM, who);
+        self.txtext.draw(can, F::Reg, 13.0, x0, by + 140.0, DIM, &who);
 
         if let Some(m) = &self.manifest {
             if !m.notes.is_empty() {
