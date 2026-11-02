@@ -200,19 +200,25 @@ def main() -> int:
         if not repo:
             repo = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
                                   capture_output=True, text=True, check=True).stdout.strip()
-        subprocess.run(["gh", "release", "delete", "dist", "--cleanup-tag", "--yes", "--repo", repo])
-        assets = [os.path.join(out, x) for x in sorted(os.listdir(out))]
-        # Лоадер ещё и под собственным именем: игрок скачивает его из релиза руками, а безымянный
-        # object-<sha256> он сам найдёт по манифесту (start.json).
+        # два релиза: dist-objects - склад (start.json + object-<sha256>, prerelease, его качает лоадер),
+        # dist - витрина (только recode_loader.exe, Latest; его качает человек)
+        for tag in ["dist-objects", "dist"]:
+            subprocess.run(["gh", "release", "delete", tag, "--cleanup-tag", "--yes", "--repo", repo])
+        subprocess.run(
+            ["gh", "release", "create", "dist-objects", *[os.path.join(out, x) for x in sorted(os.listdir(out))],
+             "--repo", repo, "--title", "Файлы билда (склад лоадера)",
+             "--notes", "Технический релиз: start.json + object-<sha256>. Скачивается лоадером автоматически.",
+             "--prerelease"],
+            check=True)
         loader = next((f for f in files if f["kind"] == "loader"), None)
         if loader:
-            named = os.path.join(out, os.path.basename(loader["path"]))
-            shutil.copyfile(os.path.join(home, loader["path"]), named)
-            assets.append(named)
-        notes = f"Cursed Recode, сборка {a.build} ({a.version}). {a.notes}".strip()
-        subprocess.run(["gh", "release", "create", "dist", *assets, "--repo", repo, "--title", a.title,
-                        "--notes", notes, "--latest"], check=True)
-        print(f"релиз `dist` опубликован: {len(assets)} файлов (лоадер - {os.path.basename(loader['path']) if loader else 'нет!'})")
+            subprocess.run(
+                ["gh", "release", "create", "dist", os.path.join(home, loader["path"]),
+                 "--repo", repo, "--title", a.title,
+                 "--notes", "Windows: скачайте recode_loader.exe и запустите - игру он скачает сам. Linux: см. docs/CACHYOS.md.",
+                 "--latest"],
+                check=True)
+        print("релизы опубликованы: dist (витрина) + dist-objects (склад)")
     return 0
 
 

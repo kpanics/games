@@ -20,8 +20,9 @@ use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
-/// База дистрибутива «на GitHub»: релиз с тегом `dist` этого репозитория (переключается --base).
-const BASE: &str = "https://github.com/kpanics/games/releases/download/dist";
+/// База дистрибутива «на GitHub»: технический релиз-склад с тегом `dist-objects` (витрина `dist`
+/// держит только recode_loader.exe; объекты и start.json - там, переключается --base).
+const BASE: &str = "https://github.com/kpanics/games/releases/download/dist-objects";
 /// Публичная половина ключа манифеста — та же, что вшита в Windows-лоадер (CURSED_VERIFY_KEY CI).
 const KEY: &str = "553f8e75906c6f2cee9b76f2243625ece155f07b10a8a9779af58356b061db2c";
 /// Ассеты Minecraft — собственность Mojang, качаем с их CDN (как и Windows-лоадер).
