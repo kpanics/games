@@ -6,7 +6,7 @@
 //! Порядок и види файлов - как у Windows-лоадера (Cursed-Recode-Loader-main/src/loader), глазами
 //! Linux: тот же start.json, те же хеши, тот же home с loader/ внутри.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -582,13 +582,54 @@ impl Manifest {
     }
 }
 
-/// Хвост лога игры — для окна лоадера.
-pub fn log_tail(home: &Path, lines: usize) -> Vec<String> {
-    let path = home.join("loader").join("game.log");
-    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    let mut out: Vec<String> = text.lines().rev().take(lines).map(str::to_string).collect();
-    out.reverse();
-    out
+/// Живой хвост лога игры для окна лоадера: помнит, до чего дочитал, и берёт только новое — лог
+/// растёт по ходу игры, и перечитывать его целиком каждые 100 мс ни к чему.
+pub struct LogFollow {
+    path: PathBuf,
+    offset: u64,
+    lines: VecDeque<String>,
+    pending: Vec<u8>,
+}
+
+impl LogFollow {
+    pub fn new(home: &Path) -> LogFollow {
+        LogFollow { path: home.join("loader").join("game.log"), offset: 0, lines: VecDeque::new(), pending: Vec::new() }
+    }
+
+    /// Последние `keep` строк: что дописалось с прошлого раза — дочитано и поднято.
+    pub fn tail(&mut self, keep: usize) -> Vec<String> {
+        use std::io::{Seek, SeekFrom};
+        let len = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        if len < self.offset {
+            // лог начат заново (новый запуск игры пишет с нуля)
+            self.offset = 0;
+            self.lines.clear();
+            self.pending.clear();
+        }
+        if len > self.offset {
+            if let Ok(mut f) = std::fs::File::open(&self.path) {
+                if f.seek(SeekFrom::Start(self.offset)).is_ok() {
+                    let mut buf = Vec::new();
+                    if f.read_to_end(&mut buf).is_ok() {
+                        self.offset += buf.len() as u64;
+                        self.pending.extend(buf);
+                    }
+                }
+            }
+        }
+        // целые строки — в кольцо (перевод строки не бывает серединой знака UTF-8, резать по нему
+        // всегда можно); хвост без перевода — ждать следующих байтов
+        if let Some(at) = self.pending.iter().rposition(|&b| b == b'\n') {
+            for l in String::from_utf8_lossy(&self.pending[..=at]).lines() {
+                self.lines.push_back(l.to_string());
+            }
+            self.pending.drain(..=at);
+        }
+        while self.lines.len() > 512 {
+            self.lines.pop_front();
+        }
+        self.lines.iter().rev().take(keep).rev().cloned().collect()
+    }
 }
 
 /// Сколько байт занимает папка (для экрана настроек).

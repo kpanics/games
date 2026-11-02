@@ -1,14 +1,20 @@
 //! Окно лоадера на Linux — верное окну Windows-лоадера по экранам, текстам и шрифтам (Geist):
-//! Setup (папка игры), Menu (Играть/Настройки/Ссылки…), Sync (прогресс), Settings, Message, Playing
-//! (живой хвост лога игры). Фон — тихий градиент вместо живой «долины» Windows-лоадера (тот рендер
-//! Win32-завязан), панели — стеклянные, кнопки — те же ряды. Входа через сайт нет: дистрибутив на
-//! GitHub (dist/README.md), сессия локальная, игрок — «Player».
+//! Setup (папка игры), Menu, Sync (прогресс), Settings, Links, Message, Playing (живой хвост
+//! лога игры). Фон — тихий градиент вместо живой «долины» Windows-лоадера (тот рендер
+//! Win32-завязан). Входа через сайт нет: дистрибутив на GitHub (dist/README.md), игрок — «Player».
 //!
-//! Рендер — CPU-композитинг (winit + softbuffer + fontdue): меню - статичная 2D-картинка, для неё
-//! этого довольно; Vulkan начинает работать, когда начинается сама игра (под Wine, winevulkan).
+//! Рендер — CPU-композитинг (winit + softbuffer + fontdue), и он не работает зря: фон готовится
+//! один раз на размер окна и дальше лишь копируется в кадр, глиф растеризуется один раз на размер
+//! шрифта и остаётся в кэше, статичные экраны (меню, настройки) перерисовываются только по
+//! событиям — тик раз в 100 мс будит окно лишь там, где есть движение (загрузка, каретка, лог).
+//! HiDPI: раскладка считается в логических пикселях и умножается на масштаб экрана, глифы
+//! растеризуются в физических — чётко на любом масштабе.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Child;
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{mpsc, Arc};
@@ -30,18 +36,114 @@ static SEMI: &[u8] = include_bytes!("../../assets/fonts/geist_600.ttf");
 static BOLD: &[u8] = include_bytes!("../../assets/fonts/geist_700.ttf");
 static MONO: &[u8] = include_bytes!("../../assets/fonts/geistmono_500.ttf");
 
-struct Fonts {
-    reg: Font,
-    med: Font,
-    semi: Font,
-    #[allow(dead_code)]
-    bold: Font,
-    mono: Font,
+/// Сырой RGBA 64×64 — тот же квадрат, что в recode.ico лоадера.
+static ICON: &[u8] = include_bytes!("../../assets/icon.rgba");
+
+/// Лицо шрифта: обычный, средний, полужирный, жирный, моно.
+#[derive(Copy, Clone)]
+#[allow(dead_code)] // Bold — в наборе Geist и пригодится, лица не выключаются из набора
+enum F {
+    Reg,
+    Med,
+    Semi,
+    Bold,
+    Mono,
 }
 
-fn fonts() -> Fonts {
-    let mk = |b: &[u8]| Font::from_bytes(b, fontdue::FontSettings::default()).expect("шрифт Geist");
-    Fonts { reg: mk(REG), med: mk(MED), semi: mk(SEMI), bold: mk(BOLD), mono: mk(MONO) }
+/// Растеризованный глиф: шаг пера в логических пикселях, остальное — в физических.
+struct Glyph {
+    adv: f32,
+    xmin: i32,
+    ymin: i32,
+    w: usize,
+    h: usize,
+    cov: Vec<u8>,
+}
+
+/// Пять лиц Geist с кэшем растра: глиф растеризуется при первом обращении (в физическом размере
+/// текущего масштаба экрана) и дальше берётся готовым — растеризация и была главной работой кадра.
+struct Text {
+    faces: [Font; 5],
+    k: Cell<f32>,
+    cache: RefCell<HashMap<(u8, u16, char), Rc<Glyph>>>,
+}
+
+impl Text {
+    fn new() -> Text {
+        let mk = |b: &[u8]| Font::from_bytes(b, fontdue::FontSettings::default()).expect("шрифт Geist");
+        Text { faces: [mk(REG), mk(MED), mk(SEMI), mk(BOLD), mk(MONO)], k: Cell::new(1.0), cache: RefCell::new(HashMap::new()) }
+    }
+
+    fn set_k(&self, k: f32) {
+        if (self.k.get() - k).abs() > 1e-6 {
+            self.k.set(k);
+            self.cache.borrow_mut().clear();
+        }
+    }
+
+    fn glyph(&self, f: F, size: f32, ch: char) -> Rc<Glyph> {
+        let key = (f as u8, (size * 4.0).round() as u16, ch);
+        let hit = self.cache.borrow().get(&key).cloned();
+        if let Some(g) = hit {
+            return g;
+        }
+        let k = self.k.get();
+        let (m, cov) = self.faces[f as usize].rasterize(ch, size * k);
+        let g = Rc::new(Glyph {
+            adv: m.advance_width / k,
+            xmin: m.xmin,
+            ymin: m.ymin,
+            w: m.width,
+            h: m.height,
+            cov,
+        });
+        self.cache.borrow_mut().insert(key, g.clone());
+        g
+    }
+
+    fn width(&self, f: F, size: f32, text: &str) -> f32 {
+        text.chars().map(|ch| self.glyph(f, size, ch).adv).sum()
+    }
+
+    fn ascent(&self, f: F, size: f32) -> f32 {
+        -self.glyph(f, size, 'H').ymin as f32 / self.k.get()
+    }
+
+    fn wrap(&self, f: F, size: f32, text: &str, max_w: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for raw in text.split('\n') {
+            let mut line = String::new();
+            for word in raw.split(' ') {
+                let try_line = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+                if self.width(f, size, &try_line) > max_w && !line.is_empty() {
+                    lines.push(line);
+                    line = word.to_string();
+                } else {
+                    line = try_line;
+                }
+            }
+            lines.push(line);
+        }
+        lines
+    }
+
+    fn draw(&self, can: &mut Canvas, f: F, size: f32, x: f32, base: f32, c: u32, text: &str) -> f32 {
+        let k = self.k.get();
+        let mut pen = x;
+        for ch in text.chars() {
+            let g = self.glyph(f, size, ch);
+            let gx = pen * k + g.xmin as f32;
+            let gy = base * k + g.ymin as f32;
+            for (i, a) in g.cov.iter().enumerate() {
+                if *a == 0 {
+                    continue;
+                }
+                can.blend(gx as i64 + (i % g.w) as i64, gy as i64 + (i / g.w) as i64, c, *a);
+            }
+            pen += g.adv;
+        }
+        pen - x
+    }
 }
 
 // ---------------------------------------------------------------------------------------------- палитра
@@ -66,9 +168,11 @@ fn lighten(c: u32, k: f32) -> u32 {
 
 // ---------------------------------------------------------------------------------------------- холст
 
+/// Кадр в физических пикселях; прямоугольники задаются логическими и умножаются на масштаб.
 struct Canvas<'a> {
     w: usize,
     h: usize,
+    k: f32,
     buf: &'a mut [u32],
 }
 
@@ -93,10 +197,11 @@ impl<'a> Canvas<'a> {
     }
 
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: u32) {
-        let x0 = x.ceil() as i64;
-        let y0 = y.ceil() as i64;
-        let x1 = (x + w).floor() as i64;
-        let y1 = (y + h).floor() as i64;
+        let k = self.k;
+        let x0 = (x * k).ceil() as i64;
+        let y0 = (y * k).ceil() as i64;
+        let x1 = ((x + w) * k).floor() as i64;
+        let y1 = ((y + h) * k).floor() as i64;
         for yy in y0..y1 {
             for xx in x0..x1 {
                 self.blend(xx, yy, c, 255);
@@ -131,56 +236,6 @@ impl<'a> Canvas<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------------------------- текст
-
-fn draw_text(can: &mut Canvas, f: &Font, size: f32, x: f32, base: f32, c: u32, text: &str) -> f32 {
-    let mut pen = x;
-    for ch in text.chars() {
-        let (m, cov) = f.rasterize(ch, size);
-        let (gw, gh) = (m.width, m.height);
-        if gw == 0 || gh == 0 {
-            pen += m.advance_width;
-            continue;
-        }
-        let gx = pen + m.xmin as f32;
-        let gy = base + m.ymin as f32;
-        for (i, a) in cov.iter().enumerate() {
-            if *a == 0 {
-                continue;
-            }
-            can.blend(gx as i64 + (i % gw) as i64, gy as i64 + (i / gw) as i64, c, *a);
-        }
-        pen += m.advance_width;
-    }
-    pen - x
-}
-
-fn width_of(f: &Font, size: f32, text: &str) -> f32 {
-    text.chars().map(|ch| f.rasterize(ch, size).0.advance_width).sum()
-}
-
-fn ascent_of(f: &Font, size: f32) -> f32 {
-    -f.rasterize('H', size).0.ymin as f32
-}
-
-fn wrap(f: &Font, size: f32, text: &str, max_w: f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    for raw in text.split('\n') {
-        let mut line = String::new();
-        for word in raw.split(' ') {
-            let try_line = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-            if width_of(f, size, &try_line) > max_w && !line.is_empty() {
-                lines.push(line);
-                line = word.to_string();
-            } else {
-                line = try_line;
-            }
-        }
-        lines.push(line);
-    }
-    lines
-}
-
 // ---------------------------------------------------------------------------------------------- экраны и состояние
 
 #[derive(Clone)]
@@ -194,6 +249,13 @@ enum Screen {
     Message { title: String, text: String },
     Playing,
     Field,
+}
+
+/// Что вводят в поле пути: папку игры или какой wine брать.
+#[derive(Copy, Clone, PartialEq)]
+enum FieldKind {
+    Folder,
+    Wine,
 }
 
 #[derive(Clone, PartialEq)]
@@ -224,7 +286,7 @@ enum ToUi {
 
 /// Вся картина окна: экран, настройки, прогресс, кнопки последнего кадра.
 struct Ui {
-    fonts: Fonts,
+    tx: Text,
     screen: Screen,
     settings: lib::Settings,
     home: PathBuf,
@@ -234,12 +296,23 @@ struct Ui {
     child: Option<Child>,
     sync_at: Option<Instant>,
     auto_launch: bool,
+    syncing: bool,
     rx: Receiver<ToUi>,
     mouse: (f32, f32),
     hits: Vec<(Rect, Hit)>,
     field: String,
+    field_kind: FieldKind,
     tick: u64,
     drag: bool,
+    /// Масштаб экрана (физические пиксели на логический).
+    k: f32,
+    /// Готовый фон: градиент пересчитывается только при смене размера окна.
+    bg: Vec<u32>,
+    bg_w: usize,
+    bg_h: usize,
+    /// Размер папки — считается один раз на заход в раздел, а не каждым кадром.
+    folder_bytes: Option<u64>,
+    log: lib::LogFollow,
 }
 
 const PAD: f32 = 56.0;
@@ -262,8 +335,12 @@ impl Ui {
         self.screen = Screen::Message { title, text };
     }
 
-    /// Синк в фоне; если просили — сразу запуск и экран Playing.
+    /// Синк в фоне; если просили — сразу запуск и экран Playing. Второй поверх идущего не стартует.
     fn begin_sync(&mut self, auto_launch: bool) {
+        if self.syncing {
+            return;
+        }
+        self.syncing = true;
         self.auto_launch = auto_launch;
         self.sync_at = Some(Instant::now());
         self.screen = Screen::Busy;
@@ -293,29 +370,36 @@ impl Ui {
         });
     }
 
-    /// Раз в 100 мс: что сказали фоновые потоки, жива ли игра.
-    fn on_tick(&mut self) {
+    /// Раз в 100 мс: что сказали фоновые потоки, жива ли игра. Ответ — было ли что-то, что видно.
+    fn on_tick(&mut self) -> bool {
+        let mut changed = false;
         loop {
             match self.rx.try_recv() {
                 Ok(ToUi::Started(p)) => {
                     self.progress = Some(p);
                     self.screen = Screen::Sync;
+                    changed = true;
                 }
-                Ok(ToUi::SyncDone(r)) => match r {
-                    Ok(m) => {
-                        self.manifest = Some(m);
-                        if !self.auto_launch {
-                            self.screen = Screen::Menu;
+                Ok(ToUi::SyncDone(r)) => {
+                    self.syncing = false;
+                    match r {
+                        Ok(m) => {
+                            self.manifest = Some(m);
+                            if !self.auto_launch {
+                                self.screen = Screen::Menu;
+                            }
+                        }
+                        Err(e) => {
+                            self.progress = None;
+                            self.message(self.t("Синхронизация не вышла", "The sync did not finish"), e);
                         }
                     }
-                    Err(e) => {
-                        self.progress = None;
-                        self.message(self.t("Синхронизация не вышла", "The sync did not finish"), e);
-                    }
-                },
+                    changed = true;
+                }
                 Ok(ToUi::Launched(r)) => match r {
                     Ok(c) => {
                         self.child = Some(c);
+                        self.log = lib::LogFollow::new(&self.home);
                         self.screen = Screen::Playing;
                     }
                     Err(e) => {
@@ -332,7 +416,7 @@ impl Ui {
         if let Some(status) = exited {
             self.child = None;
             if !status.success() {
-                let tail = lib::log_tail(&self.home, 8).join("\n");
+                let tail = self.log.tail(8).join("\n");
                 self.message(
                     self.t("Игра закрылась с ошибкой", "The game closed with an error"),
                     format!("{} {}.\n\n{}", self.t("Код выхода:", "Exit code:"), status.code().unwrap_or(-1), tail),
@@ -340,7 +424,9 @@ impl Ui {
             } else {
                 self.screen = Screen::Menu;
             }
+            changed = true;
         }
+        changed
     }
 
     fn click(&mut self, mx: f32, my: f32) {
@@ -373,19 +459,33 @@ impl Ui {
                 self.begin_sync(false);
             }
             "browse" | "change-folder" => {
+                self.field_kind = FieldKind::Folder;
                 self.field = self.home.to_string_lossy().into_owned();
                 self.screen = Screen::Field;
             }
-            "field-ok" => {
-                let text = self.field.trim().to_string();
-                if !text.is_empty() {
-                    self.home = PathBuf::from(&text);
-                    self.settings.home = text;
+            "field-ok" => match self.field_kind {
+                FieldKind::Wine => {
+                    self.settings.wine = self.field.trim().to_string();
                     self.settings.save(&self.home);
+                    self.screen = Screen::Settings(1);
                 }
-                self.screen = Screen::Setup;
+                FieldKind::Folder => {
+                    let text = self.field.trim().to_string();
+                    if !text.is_empty() {
+                        self.home = PathBuf::from(&text);
+                        self.settings.home = text;
+                        self.settings.save(&self.home);
+                        self.log = lib::LogFollow::new(&self.home);
+                    }
+                    self.screen = Screen::Setup;
+                }
+            },
+            "field-cancel" => {
+                self.screen = match self.field_kind {
+                    FieldKind::Wine => Screen::Settings(1),
+                    FieldKind::Folder => Screen::Setup,
+                };
             }
-            "field-cancel" => self.screen = Screen::Setup,
             "play" => {
                 if self.child.is_some() {
                     self.message(
@@ -402,12 +502,16 @@ impl Ui {
             "back" => self.screen = Screen::Menu,
             "sec0" => self.screen = Screen::Settings(0),
             "sec1" => self.screen = Screen::Settings(1),
-            "sec2" => self.screen = Screen::Settings(2),
+            "sec2" => {
+                self.folder_bytes = Some(lib::dir_bytes(&self.home));
+                self.screen = Screen::Settings(2);
+            }
             "lang" => {
                 self.settings.lang = if self.settings.lang == "ru" { "en".into() } else { "ru".into() };
                 self.settings.save(&self.home);
             }
             "wine-edit" => {
+                self.field_kind = FieldKind::Wine;
                 self.field = self.settings.wine_binary();
                 self.screen = Screen::Field;
             }
@@ -433,9 +537,9 @@ impl Ui {
     fn button(&mut self, can: &mut Canvas, x: f32, y: f32, w: f32, label: &str, action: &str, main: bool) -> f32 {
         let h = 46.0;
         let hovered = self.mouse.0 >= x && self.mouse.0 <= x + w && self.mouse.1 >= y && self.mouse.1 <= y + h;
-        let f = if main { &self.fonts.semi } else { &self.fonts.reg };
+        let f = if main { F::Semi } else { F::Reg };
         let size = 17.0;
-        let tw = width_of(f, size, label);
+        let tw = self.tx.width(f, size, label);
         let bg = if main {
             if hovered { lighten(MAIN_BG, 0.08) } else { MAIN_BG }
         } else if hovered {
@@ -449,38 +553,26 @@ impl Ui {
             can.round(x, y, w, h, 10.0, PANEL_EDGE);
             can.round(x + 1.0, y + 1.0, w - 2.0, h - 2.0, 9.0, bg);
         }
-        draw_text(can, f, size, x + (w - tw) / 2.0, y + h / 2.0 + ascent_of(f, size) / 2.0 - 1.0, if main { MAIN_TEXT } else { TEXT }, label);
+        let asc = self.tx.ascent(f, size);
+        self.tx.draw(can, f, size, x + (w - tw) / 2.0, y + h / 2.0 + asc / 2.0 - 1.0, if main { MAIN_TEXT } else { TEXT }, label);
         self.hits.push((Rect { x, y, w, h }, Hit::Action(action.to_string())));
         y + h + 10.0
     }
 
-    fn background(can: &mut Canvas, w: f32, h: f32) {
-        let steps = h as usize;
-        for i in 0..steps {
-            let k = i as f32 / steps as f32;
-            let mix = |a: u32, b: u32| (((a as f32) * (1.0 - k) + (b as f32) * k + 0.5) as u32).min(255);
-            let c = rgb(
-                mix((BG_TOP >> 16) & 255, (BG_BOT >> 16) & 255) as u8,
-                mix((BG_TOP >> 8) & 255, (BG_BOT >> 8) & 255) as u8,
-                mix(BG_TOP & 255, BG_BOT & 255) as u8,
-            );
-            can.rect(0.0, i as f32, w, 1.0, c);
-        }
-    }
-
     fn cap_title(&mut self, can: &mut Canvas, w: f32, cap: &str, title: &str, sub: &str) -> f32 {
         let mut y = 64.0;
-        draw_text(can, &self.fonts.med, 13.0, PAD, y + ascent_of(&self.fonts.med, 13.0), DIM, cap.to_uppercase().as_str());
+        let cap_up = cap.to_uppercase();
+        self.tx.draw(can, F::Med, 13.0, PAD, y + self.tx.ascent(F::Med, 13.0), DIM, &cap_up);
         y += 30.0;
         if !title.is_empty() {
-            draw_text(can, &self.fonts.semi, 26.0, PAD, y + ascent_of(&self.fonts.semi, 26.0), TEXT, title);
+            self.tx.draw(can, F::Semi, 26.0, PAD, y + self.tx.ascent(F::Semi, 26.0), TEXT, title);
             y += 40.0;
         } else {
             y += 10.0;
         }
         if !sub.is_empty() {
-            for line in wrap(&self.fonts.reg, 15.5, sub, w - PAD * 2.0) {
-                draw_text(can, &self.fonts.reg, 15.5, PAD, y + ascent_of(&self.fonts.reg, 15.5), DIM, &line);
+            for line in self.tx.wrap(F::Reg, 15.5, sub, w - PAD * 2.0) {
+                self.tx.draw(can, F::Reg, 15.5, PAD, y + self.tx.ascent(F::Reg, 15.5), DIM, &line);
                 y += 23.0;
             }
             y += 14.0;
@@ -488,8 +580,31 @@ impl Ui {
         y
     }
 
+    /// Кадр: готовый фон копируется в буфер, поверх — экран. w и h — логические.
     fn draw(&mut self, can: &mut Canvas, w: f32, h: f32) {
-        Self::background(can, w, h);
+        if self.bg_w != can.w || self.bg_h != can.h || self.bg.len() != can.buf.len() {
+            let mut bg = vec![0u32; can.buf.len()];
+            for row in 0..can.h {
+                let kk = if can.h <= 1 { 0.0 } else { row as f32 / can.h as f32 };
+                let mix = |a: u32, b: u32| (((a as f32) * (1.0 - kk) + (b as f32) * kk + 0.5) as u32).min(255);
+                let c = rgb(
+                    mix((BG_TOP >> 16) & 255, (BG_BOT >> 16) & 255) as u8,
+                    mix((BG_TOP >> 8) & 255, (BG_BOT >> 8) & 255) as u8,
+                    mix(BG_TOP & 255, BG_BOT & 255) as u8,
+                );
+                bg[row * can.w..(row + 1) * can.w].fill(c);
+            }
+            self.bg = bg;
+            self.bg_w = can.w;
+            self.bg_h = can.h;
+        }
+        if self.bg.len() == can.buf.len() {
+            can.buf.copy_from_slice(&self.bg);
+        } else {
+            can.buf.fill(BG_TOP);
+        }
+        self.tx.set_k(can.k);
+        self.k = can.k;
         self.hits.clear();
         let bw = (w - PAD * 2.0).min(420.0);
         match self.screen.clone() {
@@ -503,7 +618,7 @@ impl Ui {
                         "Recode goes here — about 650 MB. Another folder can be picked.",
                     ),
                 );
-                draw_text(can, &self.fonts.mono, 15.0, PAD, y + ascent_of(&self.fonts.mono, 15.0), TEXT, &self.home.to_string_lossy());
+                self.tx.draw(can, F::Mono, 15.0, PAD, y + self.tx.ascent(F::Mono, 15.0), TEXT, &self.home.to_string_lossy());
                 let y = y + 44.0;
                 let y = self.button(can, PAD, y, bw, &self.t("Установить сюда", "Install here"), "install", true);
                 let y = self.button(can, PAD, y, bw, &self.t("Другая папка", "Another folder"), "browse", false);
@@ -512,25 +627,25 @@ impl Ui {
             Screen::Busy => {
                 self.cap_title(can, w, &self.t("Подожди", "A moment"), &self.t("Проверяю файлы…", "Checking the files…"), "");
                 let dots = ".".repeat((self.tick % 8) as usize / 2 + 1);
-                draw_text(can, &self.fonts.reg, 15.0, PAD, 180.0, DIM, &dots);
+                self.tx.draw(can, F::Reg, 15.0, PAD, 180.0, DIM, &dots);
             }
             Screen::Menu => {
-                draw_text(can, &self.fonts.semi, 24.0, PAD, 74.0, TEXT, "Cursed Recode");
+                self.tx.draw(can, F::Semi, 24.0, PAD, 74.0, TEXT, "Cursed Recode");
                 if let Some(m) = &self.manifest {
                     let sub = format!("{} {}", self.t("билд", "build"), m.build);
-                    draw_text(can, &self.fonts.reg, 13.5, PAD, 100.0, DIM, &sub);
+                    self.tx.draw(can, F::Reg, 13.5, PAD, 100.0, DIM, &sub);
                 }
                 let login = "Player";
-                let lw = width_of(&self.fonts.med, 14.0, login);
-                draw_text(can, &self.fonts.med, 14.0, w - PAD - lw, 74.0, DIM, login);
+                let lw = self.tx.width(F::Med, 14.0, login);
+                self.tx.draw(can, F::Med, 14.0, w - PAD - lw, 74.0, DIM, login);
 
                 if let Some(m) = &self.manifest {
                     if !m.notes.is_empty() {
                         let notes = format!("{} · {}", self.t("Что нового", "What's new"), m.notes.replace('\n', " "));
-                        let lines = wrap(&self.fonts.reg, 13.0, &notes, (w - PAD * 2.0).min(520.0));
+                        let lines = self.tx.wrap(F::Reg, 13.0, &notes, (w - PAD * 2.0).min(520.0));
                         let mut ny = h - 40.0 - lines.len() as f32 * 19.0;
-                        for line in lines {
-                            draw_text(can, &self.fonts.reg, 13.0, PAD, ny, DIM, &line);
+                        for line in &lines {
+                            self.tx.draw(can, F::Reg, 13.0, PAD, ny, DIM, line);
                             ny += 19.0;
                         }
                     }
@@ -563,30 +678,30 @@ impl Ui {
                 let y = self.cap_title(can, w, &self.t("Подожди", "A moment"), &title, "");
                 let mb = |b: u64| b / 1048576;
                 if total_b == 0 {
-                    draw_text(can, &self.fonts.reg, 16.0, PAD, y + 30.0, DIM, &self.t("Всё уже на месте", "Everything is already there"));
+                    self.tx.draw(can, F::Reg, 16.0, PAD, y + 30.0, DIM, &self.t("Всё уже на месте", "Everything is already there"));
                 } else {
                     let big = format!("{} / {} MB", mb(done_b), mb(total_b));
-                    draw_text(can, &self.fonts.semi, 30.0, PAD, y + 34.0, TEXT, &big);
-                    let files = format!("{} / {} {}", mb(done_f), mb(total_f), self.t("файлов", "files"));
-                    draw_text(can, &self.fonts.reg, 14.0, PAD, y + 62.0, DIM, &files);
+                    self.tx.draw(can, F::Semi, 30.0, PAD, y + 34.0, TEXT, &big);
+                    let files = format!("{} / {} {}", done_f, total_f, self.t("файлов", "files"));
+                    self.tx.draw(can, F::Reg, 14.0, PAD, y + 62.0, DIM, &files);
                     if let Some(at) = self.sync_at {
                         let secs = at.elapsed().as_secs_f32().max(0.5);
                         let speed = format!("{:.1} {}", done_b as f32 / 1048576.0 / secs, self.t("МБ/с", "MB/s"));
-                        let sw = width_of(&self.fonts.reg, 14.0, &speed);
-                        draw_text(can, &self.fonts.reg, 14.0, w - PAD - sw, y + 62.0, DIM, &speed);
+                        let sw = self.tx.width(F::Reg, 14.0, &speed);
+                        self.tx.draw(can, F::Reg, 14.0, w - PAD - sw, y + 62.0, DIM, &speed);
                     }
                     let bar_w = (w - PAD * 2.0).min(560.0);
                     let by = y + 100.0;
                     can.round(PAD, by, bar_w, 6.0, 3.0, TRACK);
-                    let k = done_b as f32 / total_b as f32;
-                    if k > 0.0 {
-                        can.round(PAD, by, (bar_w * k).max(6.0), 6.0, 3.0, MAIN_BG);
+                    let part = done_b as f32 / total_b as f32;
+                    if part > 0.0 {
+                        can.round(PAD, by, (bar_w * part).max(6.0), 6.0, 3.0, MAIN_BG);
                     }
                 }
                 let dots = ".".repeat((self.tick % 8) as usize / 2 + 1);
-                let status = if phase == 0 { format!("{}{}", self.t("Проверяю файлы", "Checking the files"), dots) } else { String::new() };
-                if !status.is_empty() {
-                    draw_text(can, &self.fonts.reg, 13.0, PAD, y + 130.0, DIM, &status);
+                if phase == 0 {
+                    let status = format!("{}{}", self.t("Проверяю файлы", "Checking the files"), dots);
+                    self.tx.draw(can, F::Reg, 13.0, PAD, y + 130.0, DIM, &status);
                 }
             }
             Screen::Settings(sec) => {
@@ -594,10 +709,11 @@ impl Ui {
                 let names = [self.t("Игра", "Game"), self.t("Компьютер", "Computer"), self.t("Папка", "Folder")];
                 let mut x = PAD;
                 for (i, name) in names.iter().enumerate() {
-                    let tw = width_of(&self.fonts.med, 14.0, name) + 28.0;
+                    let tw = self.tx.width(F::Med, 14.0, name) + 28.0;
                     let on = i == sec;
                     can.round(x, y, tw, 34.0, 8.0, if on { PANEL } else { TRACK });
-                    draw_text(can, &self.fonts.med, 14.0, x + 14.0, y + 17.0 + ascent_of(&self.fonts.med, 14.0) / 2.0 - 1.0, if on { TEXT } else { DIM }, name);
+                    let asc = self.tx.ascent(F::Med, 14.0);
+                    self.tx.draw(can, F::Med, 14.0, x + 14.0, y + 17.0 + asc / 2.0 - 1.0, if on { TEXT } else { DIM }, name);
                     self.hits.push((Rect { x, y, w: tw, h: 34.0 }, Hit::Action(format!("sec{i}"))));
                     x += tw + 8.0;
                 }
@@ -605,52 +721,52 @@ impl Ui {
                 let sw = (w - PAD * 2.0).min(520.0);
                 match sec {
                     0 => {
-                        draw_text(can, &self.fonts.reg, 15.0, PAD, y + 10.0, TEXT, &self.t("Память для игры", "Memory for the game"));
+                        self.tx.draw(can, F::Reg, 15.0, PAD, y + 10.0, TEXT, &self.t("Память для игры", "Memory for the game"));
                         let val = format!("{:.1} {}", self.settings.memory as f32 / 1024.0, self.t("ГБ", "GB"));
-                        let vw = width_of(&self.fonts.mono, 14.0, &val);
-                        draw_text(can, &self.fonts.mono, 14.0, PAD + sw - vw, y + 10.0, DIM, &val);
+                        let vw = self.tx.width(F::Mono, 14.0, &val);
+                        self.tx.draw(can, F::Mono, 14.0, PAD + sw - vw, y + 10.0, DIM, &val);
                         let sy = y + 42.0;
                         can.round(PAD, sy, sw, 6.0, 3.0, TRACK);
-                        let k = ((self.settings.memory as f32 - 2048.0) / (16384.0 - 2048.0)).clamp(0.0, 1.0);
-                        let fill = (sw * k).max(6.0);
+                        let part = ((self.settings.memory as f32 - 2048.0) / (16384.0 - 2048.0)).clamp(0.0, 1.0);
+                        let fill = (sw * part).max(6.0);
                         can.round(PAD, sy, fill, 6.0, 3.0, MAIN_BG);
                         can.round(PAD + fill - 7.0, sy - 5.0, 14.0, 16.0, 7.0, MAIN_BG);
                         self.hits.push((Rect { x: PAD, y: sy - 10.0, w: sw, h: 26.0 }, Hit::Slider));
-                        for (i, line) in wrap(&self.fonts.reg, 12.5, &self.t("Сколько оперативной памяти получит игра.", "How much memory the game gets."), sw).into_iter().enumerate() {
-                            draw_text(can, &self.fonts.reg, 12.5, PAD, sy + 32.0 + i as f32 * 18.0, DIM, &line);
+                        for (i, line) in self.tx.wrap(F::Reg, 12.5, &self.t("Сколько оперативной памяти получит игра.", "How much memory the game gets."), sw).into_iter().enumerate() {
+                            self.tx.draw(can, F::Reg, 12.5, PAD, sy + 32.0 + i as f32 * 18.0, DIM, &line);
                         }
                         let y2 = sy + 80.0;
-                        draw_text(can, &self.fonts.reg, 15.0, PAD, y2 + 10.0, TEXT, &self.t("Язык", "Language"));
+                        self.tx.draw(can, F::Reg, 15.0, PAD, y2 + 10.0, TEXT, &self.t("Язык", "Language"));
                         let lang_now = if self.settings.lang == "ru" { "Русский" } else { "English" };
-                        let lw = width_of(&self.fonts.mono, 14.0, lang_now) + 28.0;
+                        let lw = self.tx.width(F::Mono, 14.0, lang_now) + 28.0;
                         can.round(PAD + sw - lw, y2, lw, 34.0, 8.0, PANEL);
-                        draw_text(can, &self.fonts.mono, 14.0, PAD + sw - lw + 14.0, y2 + 19.0, TEXT, lang_now);
+                        self.tx.draw(can, F::Mono, 14.0, PAD + sw - lw + 14.0, y2 + 19.0, TEXT, lang_now);
                         self.hits.push((Rect { x: PAD + sw - lw, y: y2, w: lw, h: 34.0 }, Hit::Action("lang".into())));
                     }
                     1 => {
-                        draw_text(can, &self.fonts.reg, 15.0, PAD, y + 10.0, TEXT, &self.t("Wine", "Wine"));
+                        self.tx.draw(can, F::Reg, 15.0, PAD, y + 10.0, TEXT, &self.t("Wine", "Wine"));
                         let wine = self.settings.wine_binary();
                         let edit = self.t("Изменить", "Change");
-                        let ew = width_of(&self.fonts.med, 14.0, &edit) + 28.0;
+                        let ew = self.tx.width(F::Med, 14.0, &edit) + 28.0;
                         can.round(PAD + sw - ew, y, ew, 34.0, 8.0, PANEL);
-                        draw_text(can, &self.fonts.med, 14.0, PAD + sw - ew + 14.0, y + 19.0, TEXT, &edit);
+                        self.tx.draw(can, F::Med, 14.0, PAD + sw - ew + 14.0, y + 19.0, TEXT, &edit);
                         self.hits.push((Rect { x: PAD + sw - ew, y, w: ew, h: 34.0 }, Hit::Action("wine-edit".into())));
-                        for (i, line) in wrap(&self.fonts.reg, 12.5, &self.t("Какой wine запускать (по умолчанию — wine из PATH).", "Which wine to run (default: wine from PATH)."), sw).into_iter().enumerate() {
-                            draw_text(can, &self.fonts.reg, 12.5, PAD, y + 76.0 + i as f32 * 18.0, DIM, &line);
+                        for (i, line) in self.tx.wrap(F::Reg, 12.5, &self.t("Какой wine запускать (по умолчанию — wine из PATH).", "Which wine to run (default: wine from PATH)."), sw).into_iter().enumerate() {
+                            self.tx.draw(can, F::Reg, 12.5, PAD, y + 76.0 + i as f32 * 18.0, DIM, &line);
                         }
                         let shown: String = if wine.chars().count() > 60 {
                             format!("…{}", wine.chars().skip(wine.chars().count() - 59).collect::<String>())
                         } else {
-                            wine.clone()
+                            wine
                         };
-                        draw_text(can, &self.fonts.mono, 14.0, PAD, y + 48.0, DIM, &shown);
+                        self.tx.draw(can, F::Mono, 14.0, PAD, y + 48.0, DIM, &shown);
                     }
                     _ => {
-                        draw_text(can, &self.fonts.reg, 15.0, PAD, y + 10.0, TEXT, &self.t("Папка игры", "The game's folder"));
-                        let size = format!("{:.1} GB", lib::dir_bytes(&self.home) as f64 / 1073741824.0);
-                        let szw = width_of(&self.fonts.mono, 14.0, &size);
-                        draw_text(can, &self.fonts.mono, 14.0, PAD + sw - szw, y + 10.0, DIM, &size);
-                        draw_text(can, &self.fonts.mono, 14.0, PAD, y + 42.0, DIM, &self.home.to_string_lossy());
+                        self.tx.draw(can, F::Reg, 15.0, PAD, y + 10.0, TEXT, &self.t("Папка игры", "The game's folder"));
+                        let size = format!("{:.1} GB", self.folder_bytes.unwrap_or(0) as f64 / 1073741824.0);
+                        let szw = self.tx.width(F::Mono, 14.0, &size);
+                        self.tx.draw(can, F::Mono, 14.0, PAD + sw - szw, y + 10.0, DIM, &size);
+                        self.tx.draw(can, F::Mono, 14.0, PAD, y + 42.0, DIM, &self.home.to_string_lossy());
                         let y = y + 70.0;
                         let y = self.button(can, PAD, y, sw, &self.t("Открыть папку", "Open the folder"), "open-folder", false);
                         let y = self.button(can, PAD, y, sw, &self.t("Проверить файлы", "Check the files"), "check-files", false);
@@ -680,30 +796,39 @@ impl Ui {
                         "The game's output is below and in loader/game.log. This window can be minimized: the game keeps running.",
                     ),
                 );
+                let lines = self.log.tail(14);
                 let mut ly = y;
-                for line in lib::log_tail(&self.home, 14) {
-                    let short: String = if line.chars().count() > 110 { line.chars().take(110).collect() } else { line };
-                    draw_text(can, &self.fonts.mono, 12.5, PAD, ly, DIM, &short);
+                for line in &lines {
+                    let short: String = if line.chars().count() > 110 { line.chars().take(110).collect() } else { line.clone() };
+                    self.tx.draw(can, F::Mono, 12.5, PAD, ly, DIM, &short);
                     ly += 18.0;
                 }
                 self.button(can, PAD, h - PAD - 46.0, bw, &self.t("Свернуть в меню", "Back to the menu"), "back", false);
             }
             Screen::Field => {
-                let y = self.cap_title(
-                    can, w,
-                    &self.t("Папка", "Folder"),
-                    &self.t("Другая папка", "Another folder"),
-                    &self.t(
-                        "Полный путь к папке игры (создастся, если её нет).",
-                        "The full path of the game's folder (made if there is none).",
+                let (cap, title, sub) = match self.field_kind {
+                    FieldKind::Folder => (
+                        self.t("Папка", "Folder"),
+                        self.t("Другая папка", "Another folder"),
+                        self.t("Полный путь к папке игры (создастся, если её нет).", "The full path of the game's folder (made if there is none)."),
                     ),
-                );
+                    FieldKind::Wine => (
+                        self.t("Wine", "Wine"),
+                        self.t("Какой wine", "Which wine"),
+                        self.t("Путь к wine или его имя (пусто — wine из PATH).", "The path to wine or its name (empty: wine from PATH)."),
+                    ),
+                };
+                let y = self.cap_title(can, w, &cap, &title, &sub);
                 let fw = (w - PAD * 2.0).min(560.0);
                 can.round(PAD, y, fw, 44.0, 10.0, PANEL_EDGE);
                 can.round(PAD + 1.0, y + 1.0, fw - 2.0, 42.0, 9.0, PANEL);
                 let caret = if self.tick % 10 < 5 { "|" } else { "" };
-                let shown = if self.field.chars().count() > 52 { format!("…{}", self.field.chars().skip(self.field.chars().count() - 51).collect::<String>()) } else { self.field.clone() };
-                draw_text(can, &self.fonts.mono, 15.0, PAD + 16.0, y + 27.0, TEXT, &format!("{shown}{caret}"));
+                let shown = if self.field.chars().count() > 52 {
+                    format!("…{}", self.field.chars().skip(self.field.chars().count() - 51).collect::<String>())
+                } else {
+                    self.field.clone()
+                };
+                self.tx.draw(can, F::Mono, 15.0, PAD + 16.0, y + 27.0, TEXT, &format!("{shown}{caret}"));
                 let y = y + 64.0;
                 let y = self.button(can, PAD, y, bw, &self.t("ОК", "OK"), "field-ok", true);
                 self.button(can, PAD, y, bw, &self.t("Отмена", "Cancel"), "field-cancel", false);
@@ -735,21 +860,30 @@ fn redraw() {
     });
 }
 
+fn window_scale() -> f32 {
+    WINDOW.with(|w| w.borrow().as_ref().map(|win| win.scale_factor() as f32).unwrap_or(1.0)).max(0.1)
+}
+
 impl ApplicationHandler<Ticker> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.draw.is_some() {
             return;
         }
+        use winit::platform::x11::WindowAttributesExtX11;
+        let icon = winit::window::Icon::from_rgba(ICON.to_vec(), 64, 64).ok();
         let attrs = WindowAttributes::default()
             .with_title("Cursed Recode")
+            .with_name("cursed-recode", "cursed-recode")
             .with_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(720.0, 480.0));
+            .with_min_inner_size(winit::dpi::LogicalSize::new(720.0, 480.0))
+            .with_window_icon(icon);
         let Ok(window) = event_loop.create_window(attrs) else {
             eprintln!("не вышло открыть окно (X11 или Wayland?)");
             std::process::exit(1);
         };
         let window: &'static Window = Box::leak(Box::new(window));
         WINDOW.with(|w| *w.borrow_mut() = Some(window));
+        self.ui.k = window.scale_factor() as f32;
         let context = match softbuffer::Context::new(window) {
             Ok(c) => c,
             Err(e) => {
@@ -769,14 +903,15 @@ impl ApplicationHandler<Ticker> for App {
                 let s = window.inner_size();
                 (s.width, s.height)
             };
+            let k = window.scale_factor() as f32;
             let _ = surface.resize(
                 std::num::NonZeroU32::new(w.max(1)).unwrap(),
                 std::num::NonZeroU32::new(h.max(1)).unwrap(),
             );
             let Ok(mut buffer) = surface.buffer_mut() else { return };
             {
-                let mut can = Canvas { w: w.max(1) as usize, h: h.max(1) as usize, buf: &mut buffer[..] };
-                ui.draw(&mut can, w as f32, h as f32);
+                let mut can = Canvas { w: w.max(1) as usize, h: h.max(1) as usize, k, buf: &mut buffer[..] };
+                ui.draw(&mut can, w as f32 / k, h as f32 / k);
             }
             let _ = buffer.present();
         };
@@ -788,7 +923,8 @@ impl ApplicationHandler<Ticker> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => {
-                self.ui.mouse = (position.x as f32, position.y as f32);
+                let k = window_scale();
+                self.ui.mouse = (position.x as f32 / k, position.y as f32 / k);
                 if self.ui.drag {
                     for (r, h) in self.ui.hits.clone() {
                         if h == Hit::Slider {
@@ -836,22 +972,29 @@ impl ApplicationHandler<Ticker> for App {
                     draw(&mut self.ui);
                 }
             }
-            WindowEvent::Resized(_) => redraw(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => redraw(),
             _ => {}
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _t: Ticker) {
-        self.ui.tick = self.ui.tick.wrapping_add(1);
-        self.ui.on_tick();
-        redraw();
+    /// Тик каждые 100 мс: будит окно только если что-то видно изменилось или экран живой
+    /// (загрузка, каретка ввода, хвост лога) — меню и настройки спят между событиями.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, t: Ticker) {
+        self.ui.tick = t.0;
+        let changed = self.ui.on_tick();
+        let live = matches!(self.ui.screen, Screen::Sync | Screen::Busy | Screen::Playing)
+            || (matches!(self.ui.screen, Screen::Field) && self.ui.tick % 5 == 0);
+        if changed || live {
+            redraw();
+        }
     }
 }
 
 fn main() {
     let home = lib::home_of(&lib::Settings::default(), None);
+    let log = lib::LogFollow::new(&home);
     let mut ui = Ui {
-        fonts: fonts(),
+        tx: Text::new(),
         screen: Screen::Setup,
         settings: lib::Settings::load(&home),
         home,
@@ -861,12 +1004,20 @@ fn main() {
         child: None,
         sync_at: None,
         auto_launch: false,
+        syncing: false,
         rx: mpsc::channel().1,
         mouse: (-100.0, -100.0),
         hits: Vec::new(),
         field: String::new(),
+        field_kind: FieldKind::Folder,
         tick: 0,
         drag: false,
+        k: 1.0,
+        bg: Vec::new(),
+        bg_w: 0,
+        bg_h: 0,
+        folder_bytes: None,
+        log,
     };
     // папка уже выбрана - сразу к делу: проверить файлы и в меню
     if ui.chosen() {

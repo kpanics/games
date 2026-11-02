@@ -8,5 +8,5 @@ Exec=cursed-recode
 Icon=cursed-recode
 Terminal=false
 Categories=Game;ActionGame;
-StartupWMClass=Cursed Recode
+StartupWMClass=cursed-recode
 SingleMainWindow=true
