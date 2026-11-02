@@ -601,7 +601,7 @@ impl Ui {
                     self.hits.push((Rect { x, y, w: tw, h: 34.0 }, Hit::Action(format!("sec{i}"))));
                     x += tw + 8.0;
                 }
-                let mut y = y + 58.0;
+                let y = y + 58.0;
                 let sw = (w - PAD * 2.0).min(520.0);
                 match sec {
                     0 => {
@@ -757,7 +757,7 @@ impl ApplicationHandler<Ticker> for App {
                 std::process::exit(1);
             }
         };
-        let surface = match softbuffer::Surface::new(&context, window) {
+        let mut surface = match softbuffer::Surface::new(&context, window) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("softbuffer: {e}");
@@ -872,7 +872,7 @@ fn main() {
     if ui.chosen() {
         ui.begin_sync(false);
     }
-    let app = App { ui, draw: None };
+    let mut app = App { ui, draw: None };
 
     let event_loop = EventLoop::<Ticker>::with_user_event().build().expect("событийный цикл");
     let proxy = event_loop.create_proxy();
