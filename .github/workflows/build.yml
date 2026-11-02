@@ -275,6 +275,9 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Install freetype (растеризация шрифтов окна лоадера)
+      run: sudo apt-get update && sudo apt-get install -y libfreetype6-dev
+
     - name: Cache
       uses: actions/cache@v4
       with:
@@ -323,10 +326,12 @@ jobs:
         cat > out/cursed-recode-linux/README.txt <<'TXT'
         Cursed Recode на Linux — готовый набор (собран CI, Ubuntu; на CachyOS/Arch работает)
 
-        cursed-recode      окно лоадера (основной путь: выбрать папку → Играть)
+        cursed-recode      окно лоадера: вкладки Играть/Новости/Аккаунт/Настройки/Ссылки
         cursed-linux-loader  то же без окна (флаги: --home, --sync-only, --launch-only, --wine, --base)
 
-        Нужно: пакеты wine и curl; видеокарта с Vulkan (NVIDIA — драйвер с libnvidia-vulkan).
+        Нужно: пакеты wine, curl и freetype2; видеокарта с Vulkan (NVIDIA — драйвер с libnvidia-vulkan).
+        Аккаунт (регистрация и вход) — через API сайта Cursed (cursedclient.xyz); вход не обязателен:
+        без него игрок — «Player». Адрес API меняется в настройках (Компьютер → API аккаунтов).
         Игра - Windows-бинарни и идёт под Wine; лоадер кладёт её на «диск C:» префикса
         (~/.wine/drive_c/CursedRecode) и копирует VC-рантаймы рядом с бинарями сам.
         Подробности: https://github.com/kpanics/games/blob/main/docs/CACHYOS.md

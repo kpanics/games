@@ -27,6 +27,10 @@ pub const KEY: &str = "553f8e75906c6f2cee9b76f2243625ece155f07b10a8a9779af58356b
 /// Ассеты Minecraft — собственность Mojang, качаем с их CDN (как и Windows-лоадер).
 pub const ASSETS: &str = "https://resources.download.minecraft.net";
 
+/// API аккаунтов сайта Cursed (соседний репозиторий recode-site-and-backend, docs/API.md):
+/// регистрация, вход лоадера (токен), проверка сессии.
+pub const API: &str = "https://cursedclient.xyz/api";
+
 // ---------------------------------------------------------------------------------------------- hex и хеши
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -92,6 +96,8 @@ pub struct Manifest {
     pub build: i64,
     pub version: String,
     pub notes: String,
+    /// Когда билд собран (unix-секунды), для вкладки новостей.
+    pub at: i64,
     pub launch: Value,
     pub files: Vec<Entry>,
 }
@@ -126,6 +132,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         build: v["build"].as_i64().ok_or("манифест: build")?,
         version: v["version"].as_str().unwrap_or("").to_string(),
         notes: v["notes"].as_str().unwrap_or("").to_string(),
+        at: v["at"].as_i64().unwrap_or(0),
         launch: v["launch"].clone(),
         files,
     })
@@ -151,11 +158,27 @@ pub struct Settings {
     pub wine: String,
     /// Папка игры, если выбрана другая; пусто - стандартная (на «диске C:» Wine).
     pub home: String,
+    /// Адрес API аккаунтов (сайт Cursed); пусто - стандартный.
+    pub api: String,
+    /// Токен входа (64 hex), живёт 180 дней после последнего использования.
+    pub token: String,
+    /// Вошедший аккаунт: UID и логин (логин идёт в игру как имя игрока).
+    pub uid: i64,
+    pub account: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { memory: 4096, lang: "ru".into(), wine: String::new(), home: String::new() }
+        Settings {
+            memory: 4096,
+            lang: "ru".into(),
+            wine: String::new(),
+            home: String::new(),
+            api: String::new(),
+            token: String::new(),
+            uid: 0,
+            account: String::new(),
+        }
     }
 }
 
@@ -177,6 +200,18 @@ impl Settings {
                 if let Some(h) = v["home"].as_str() {
                     s.home = h.into();
                 }
+                if let Some(a) = v["api"].as_str() {
+                    s.api = a.into();
+                }
+                if let Some(t) = v["token"].as_str() {
+                    s.token = t.into();
+                }
+                if let Some(u) = v["uid"].as_i64() {
+                    s.uid = u;
+                }
+                if let Some(a) = v["account"].as_str() {
+                    s.account = a.into();
+                }
             }
         }
         s
@@ -185,7 +220,10 @@ impl Settings {
     pub fn save(&self, home: &Path) {
         let dir = home.join("loader");
         let _ = std::fs::create_dir_all(&dir);
-        let v = serde_json::json!({ "memory": self.memory, "lang": self.lang, "wine": self.wine, "home": self.home });
+        let v = serde_json::json!({
+            "memory": self.memory, "lang": self.lang, "wine": self.wine, "home": self.home,
+            "api": self.api, "token": self.token, "uid": self.uid, "account": self.account,
+        });
         let tmp = dir.join("settings.tmp");
         if std::fs::write(&tmp, v.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, dir.join("settings.json"));
@@ -194,6 +232,12 @@ impl Settings {
 
     pub fn wine_binary(&self) -> String {
         if self.wine.trim().is_empty() { "wine".into() } else { self.wine.trim().into() }
+    }
+
+    /// Адрес API аккаунтов: настройка или стандартный (сайт Cursed).
+    pub fn api_base(&self) -> String {
+        let a = self.api.trim().trim_end_matches('/');
+        if a.is_empty() { API.into() } else { a.into() }
     }
 }
 
@@ -563,7 +607,9 @@ pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&st
     for a in launch["game"].as_array().into_iter().flatten().filter_map(|a| a.as_str()) {
         cmd.arg(fill(a, &root_win));
     }
-    cmd.arg("--username").arg("Player");
+    // имя игрока — логин вошедшего аккаунта (API сайта), иначе «Player»
+    let name = settings.account.trim();
+    cmd.arg("--username").arg(if name.is_empty() { "Player" } else { name });
     if let Some(s) = server.filter(|s| !s.is_empty()) {
         cmd.arg("--quickPlayMultiplayer").arg(s);
     }
@@ -630,6 +676,110 @@ impl LogFollow {
         }
         self.lines.iter().rev().take(keep).rev().cloned().collect()
     }
+}
+
+// ---------------------------------------------------------------------------------------------- аккаунт (API сайта)
+
+/// Вошедший аккаунт: что вернул `POST /api/token`.
+pub struct Auth {
+    pub uid: i64,
+    pub login: String,
+    pub token: String,
+}
+
+/// Ответ `GET /api/me` (для лоадера — без почты).
+pub struct Me {
+    pub uid: i64,
+    pub login: String,
+    pub since: i64,
+}
+
+/// JSON-запрос через curl: ответ — код статуса и тело. Origin не отправляем вовсе: токен лоадеру
+/// даётся только без него (docs/API.md), а регистрации без Origin `same_site` как раз пропускает.
+fn curl_json(method: &str, url: &str, body: Option<&str>, bearer: Option<&str>) -> Result<(u16, String), String> {
+    let mut cmd = Command::new("curl");
+    cmd.args(["-s", "-m", "20", "-w", "\n%{http_code}", "-X", method, "-H", "Content-Type: application/json"]);
+    if let Some(b) = bearer {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {b}"));
+    }
+    if let Some(b) = body {
+        cmd.arg("--data-raw").arg(b);
+    }
+    cmd.arg(url);
+    let out = cmd.output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() && out.stdout.is_empty() {
+        return Err("сервер не отвечает".into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (body, code) = match text.rsplit_once('\n') {
+        Some((b, c)) => (b.to_string(), c.trim().parse::<u16>().unwrap_or(0)),
+        None => (text, 0),
+    };
+    Ok((code, body))
+}
+
+/// Слова ошибок API (docs/API.md) — по-русски, для окна.
+fn api_err(code: u16, body: &str) -> String {
+    let word = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    let m = match word.as_str() {
+        "login" => "логин: 3–16 знаков, строчная латиница, цифры и _",
+        "email" => "почта не похожа на настоящую",
+        "password" => "пароль: 10–128 знаков",
+        "login-taken" => "такой логин уже занят",
+        "email-taken" => "такая почта уже занята",
+        "closed" => "регистрация сейчас закрыта на сервере",
+        "ip-limit" => "с этой сети больше регистрировать нельзя",
+        "wrong" => "неверный логин или пароль",
+        "wait" => "слишком много попыток — подожди немного",
+        "signed-out" => "сессия кончилась, войди снова",
+        "busy" => "сервер занят, попробуй ещё раз",
+        "origin" => "сервер отказал (origin)",
+        _ => "",
+    };
+    if m.is_empty() { format!("сервер ответил {code}") } else { m.into() }
+}
+
+/// Вход лоадера: `POST /api/token {login, password}` (login — логин или почта) → токен на 180 дней.
+pub fn sign_in(base: &str, login: &str, password: &str) -> Result<Auth, String> {
+    let body = serde_json::json!({ "login": login, "password": password }).to_string();
+    let (code, text) = curl_json("POST", &format!("{base}/token"), Some(&body), None)?;
+    if code != 200 {
+        return Err(api_err(code, &text));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|_| "сервер ответил не тем".to_string())?;
+    Ok(Auth {
+        uid: v["uid"].as_i64().unwrap_or(0),
+        login: v["login"].as_str().unwrap_or("").to_string(),
+        token: v["token"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+/// Регистрация (`POST /api/register`, полей чуть больше) и сразу вход токеном — как на сайте,
+/// где после регистрации человек уже вошедший.
+pub fn register(base: &str, login: &str, email: &str, password: &str) -> Result<Auth, String> {
+    let body = serde_json::json!({ "login": login, "email": email, "password": password }).to_string();
+    let (code, text) = curl_json("POST", &format!("{base}/register"), Some(&body), None)?;
+    if code != 200 {
+        return Err(api_err(code, &text));
+    }
+    sign_in(base, login, password)
+}
+
+/// Кто владеет токеном: `GET /api/me` с Bearer. 401 — сессия кончилась.
+pub fn whoami(base: &str, token: &str) -> Result<Me, String> {
+    let (code, text) = curl_json("GET", &format!("{base}/me"), None, Some(token))?;
+    if code != 200 {
+        return Err(api_err(code, &text));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|_| "сервер ответил не тем".to_string())?;
+    Ok(Me {
+        uid: v["uid"].as_i64().unwrap_or(0),
+        login: v["login"].as_str().unwrap_or("").to_string(),
+        since: v["since"].as_i64().unwrap_or(0),
+    })
 }
 
 /// Сколько байт занимает папка (для экрана настроек).
