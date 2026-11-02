@@ -1,0 +1,43 @@
+# Maintainer: kpanics <https://github.com/kpanics>
+# Cursed Recode на Linux: нативное окно лоадера (cursed-recode), синк и запуск игры (docs/CACHYOS.md).
+# Игра — Windows-бинарни и идёт под Wine; лоадер сам кладёт её на «диск C:» префикса и копирует
+# VC-рантаймы рядом с бинарями.
+#
+# Сборка:  makepkg -si   (из каталога с PKGBUILD, при наличии пакета git)
+# AUR-стиль: источник — ветка main этого репозитория; собирается rust-бинaries linux-loader/.
+
+pkgname=cursed-recode
+pkgver=0.2.0
+pkgrel=1
+pkgdesc='Лаунчер Cursed Recode для Linux: нативное окно, игра под Wine'
+arch=('x86_64')
+url='https://github.com/kpanics/games'
+license=('MIT') # с указанием автора (attribution), см. Cursed-Recode-Loader-main/LICENSE
+depends=('wine' 'curl' 'gcc-libs' 'hicolor-icon-theme')
+makedepends=('cargo' 'git')
+optdepends=('winetricks: разовая настройка префикса (vcrun2022)')
+source=("git+$url.git#branch=main")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/games/linux-loader"
+    cargo build --release
+}
+
+package() {
+    cd "$srcdir/games"
+
+    # окно лоадера — под именем cursed-recode; CLI остаётся cursed-linux-loader
+    install -Dm755 linux-loader/target/release/cursed-recode-gui "$pkgdir/usr/bin/cursed-recode"
+    install -Dm755 linux-loader/target/release/cursed-linux-loader "$pkgdir/usr/bin/cursed-linux-loader"
+
+    # иконки (из recode.ico самого лоадера, все размеры)
+    for f in linux-loader/assets/icons/recode_*.png; do
+        s=$(basename "$f" .png)
+        s=${s#recode_}
+        install -Dm644 "$f" "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/cursed-recode.png"
+    done
+    install -Dm644 linux-loader/assets/icon.png "$pkgdir/usr/share/icons/hicolor/64x64/apps/cursed-recode.png"
+
+    install -Dm644 packaging/cursed-recode.desktop "$pkgdir/usr/share/applications/cursed-recode.desktop"
+}

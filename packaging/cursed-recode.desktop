@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Cursed Recode
+GenericName=Game Launcher
+Comment=Лаунчер Cursed Recode (Linux): скачает игру с GitHub и запустит её под Wine
+Exec=cursed-recode
+Icon=cursed-recode
+Terminal=false
+Categories=Game;ActionGame;
+StartupWMClass=Cursed Recode
+SingleMainWindow=true

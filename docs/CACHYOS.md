@@ -1,35 +1,57 @@
 # Cursed Recode на CachyOS (Linux)
 
 Игра — Windows-бинарни (движок на Vulkan, Windows-JDK из `runtime.zip`), но протокол дистрибутива
-платформенно-нейтрален. Поэтому на Linux две рабочие схемы.
+платформенно-нейтрален. На Linux стоит нативный лоадер: окно, синк и запуск — свои, Wine появляется
+только когда начинается сама игра.
 
-## Схема A: нативный синк + Wine (рекомендуется)
+## Способ 1: окно лоадера (основной)
 
-`linux-loader/` — маленькая нативная Rust-программа без единого Win32-вызова: проверяет подпись
-`start.json`, скачивает и сверяет весь билд и ассеты Mojang, распаковывает `runtime.zip` и запускает
-игру через Wine. Windows-лоадер (его окно, TPM, самокопирование) тут не участвует вовсе.
+`cursed-recode` — нативное окно, верное Windows-лоадеру по экранам, текстам и шрифтам (Geist):
+выбор папки, меню, прогресс скачивания, настройки (память, язык, Wine, папка), ссылки и живой
+лог игры, если она закрылась с ошибкой.
+
+Пакетом (CachyOS/Arch):
 
 ```bash
-sudo pacman -S --needed rust curl wine vulkan-tools
+cd packaging
+makepkg -si            # поставит cursed-recode, иконку и пункт меню
+cursed-recode
+```
+
+Или готовым набором из CI (артефакт `cursed-recode-linux` любого зелёного прогона): распаковать
+и запустить `./cursed-recode`.
+
+Или из исходников:
+
+```bash
+sudo pacman -S --needed rust curl wine
 cd linux-loader
 cargo build --release
-./target/release/cursed-linux-loader               # синк в ~/Cursed Recode и запуск игры
-./target/release/cursed-linux-loader --sync-only   # только скачать (первый раз, посмотреть)
+./target/release/cursed-recode-gui
 ```
 
-Vulkan движка Wine проводит к вашему драйверу (winevulkan). Проверьте, что `vulkaninfo` видит GPU
-(AMD/Intel — пакет `mesa-vulkan-drivers`, NVIDIA — проприетарный драйвер).
+Нужно: пакеты `wine` и `curl`, видеокарта с Vulkan (NVIDIA — проприетарный драйвер;
+проверка — `vulkaninfo` видит GPU). Vulkan движка Wine проводит к вашему драйверу (winevulkan).
 
-Полезные флаги: `--home <папка>`, `--wine <путь>`, `--launch-only`, `--base <url>` (см. `--help`).
+Что лоадер делает за вас:
 
-## Схема B: Windows-лоадер под Wine
+- кладёт игру на «диске C:» префикса — `~/.wine/drive_c/CursedRecode` (файлы из `$HOME` Wine 11
+  в новом режиме путей зовёт `\unix\home\…`, и Windows-JDK такие пути не находит);
+- передаёт хосту абсолютные `C:\`-пути (`--jdk`, нативная библиотека) — с относительными путями
+  jvm.dll под Wine не грузится;
+- копирует VC-рантаймы (`msvcp140*`, `vcruntime140*`) из `runtime/bin` в `bin/` — Windows ищет
+  зависимости DLL рядом с exe, а не рядом с самой DLL;
+- пишет вывод игры в `loader/game.log` и показывает его хвост в окне (и на экране ошибки, если
+  игра упала).
+
+## Способ 2: без окна (CLI)
 
 ```bash
-wine recode_loader.exe        # из релиза dist
+cursed-linux-loader               # синк и запуск игры
+cursed-linux-loader --sync-only   # только скачать (первый раз, посмотреть)
 ```
 
-Его лог: `~/.wine/dosdevices/c:/Cursed Recode/loader/loader.log`, плюс строки `[loader] …` прямо в
-терминале. Если окно не появляется — соберите диагностику (ниже) и приложите файл.
+Полезные флаги: `--home <папка>`, `--wine <путь>`, `--launch-only`, `--base <url>` (см. `--help`).
 
 ## Диагностика (если что-то не заводится)
 
@@ -37,14 +59,17 @@ wine recode_loader.exe        # из релиза dist
 tools/cachyos-diag.sh путь/к/recode_loader.exe
 ```
 
-Собирает в один файл: версии wine и драйверов, `vulkaninfo`, вывод запуска лоадера под Wine
-и хвост его лога.
+Собирает в один файл: версии wine и драйверов, `vulkaninfo`, вывод запуска под Wine и хвост лога.
+Для нативного лоадера всё проще: экран ошибки сам показывает код выхода и последние строки
+`loader/game.log`; полный лог — `<папка игры>/loader/game.log`.
 
 ## Что нативно, а что нет
 
 | Слой | Статус |
 |---|---|
 | протокол дистрибутива (start.json, подпись, object-*, ассеты) | нативно (`linux-loader`) |
+| окно лоадера (экраны, шрифты Geist) | нативно (winit + CPU-композитинг; «долина» фона — тихий градиент) |
 | JDK | Windows-сборка из `runtime.zip`, работает под Wine |
 | движок и окна (Vulkan, Win32, twin) | под Wine (winevulkan) |
+| Windows-лоадер под Wine | не работает: `CreateSwapChainForComposition` в Wine не реализован — и не нужен, есть нативное окно |
 | полный нативный порт движка на Linux | не входит — это отдельный большой проект |
