@@ -7,13 +7,13 @@
 # AUR-стиль: источник — ветка main этого репозитория; собирается rust-бинaries linux-loader/.
 
 pkgname=cursed-recode
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
-pkgdesc='Лаунчер Cursed Recode для Linux: нативное окно, игра под Wine'
+pkgdesc='Лаунчер Cursed Recode для Linux: вкладки, новости, аккаунты; игра под Wine'
 arch=('x86_64')
 url='https://github.com/kpanics/games'
 license=('MIT') # с указанием автора (attribution), см. Cursed-Recode-Loader-main/LICENSE
-depends=('wine' 'curl' 'gcc-libs' 'hicolor-icon-theme')
+depends=('wine' 'curl' 'freetype2' 'gcc-libs' 'hicolor-icon-theme')
 makedepends=('cargo' 'git')
 optdepends=('winetricks: разовая настройка префикса (vcrun2022)')
 source=("git+$url.git#branch=main")
