@@ -308,6 +308,38 @@ jobs:
         ls "$HOME/test-home/game" | head -3
         echo "Linux-синк живой: подпись, билд, ассеты и распаковка - всё сошлось"
 
+    - name: GUI smoke (окно лоадера собралось, библиотеки на месте)
+      run: |
+        test -x linux-loader/target/release/cursed-recode-gui || { echo "нет cursed-recode-gui"; exit 1; }
+        ldd linux-loader/target/release/cursed-recode-gui | tee ldd.txt
+        if grep -q "not found" ldd.txt; then echo "не хватает библиотек"; exit 1; fi
+
+    - name: Готовый набор для Linux
+      run: |
+        mkdir -p out/cursed-recode-linux
+        cp linux-loader/target/release/cursed-recode-gui out/cursed-recode-linux/cursed-recode
+        cp linux-loader/target/release/cursed-linux-loader out/cursed-recode-linux/
+        cp linux-loader/assets/icon.png out/cursed-recode-linux/
+        cat > out/cursed-recode-linux/README.txt <<'TXT'
+        Cursed Recode на Linux — готовый набор (собран CI, Ubuntu; на CachyOS/Arch работает)
+
+        cursed-recode      окно лоадера (основной путь: выбрать папку → Играть)
+        cursed-linux-loader  то же без окна (флаги: --home, --sync-only, --launch-only, --wine, --base)
+
+        Нужно: пакеты wine и curl; видеокарта с Vulkan (NVIDIA — драйвер с libnvidia-vulkan).
+        Игра - Windows-бинарни и идёт под Wine; лоадер кладёт её на «диск C:» префикса
+        (~/.wine/drive_c/CursedRecode) и копирует VC-рантаймы рядом с бинарями сам.
+        Подробности: https://github.com/kpanics/games/blob/main/docs/CACHYOS.md
+        TXT
+        tar -C out -czf cursed-recode-linux.tar.gz cursed-recode-linux
+
+    - name: Артефакт для Linux
+      uses: actions/upload-artifact@v4
+      with:
+        name: cursed-recode-linux
+        path: cursed-recode-linux.tar.gz
+        retention-days: 14
+
   diagnostics-linux:
     needs: linux
     if: always() && needs.linux.result == 'failure'
