@@ -8,6 +8,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -571,6 +572,9 @@ pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&st
     std::fs::create_dir_all(log.parent().unwrap_or(home)).map_err(|e| e.to_string())?;
     let log_file = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&log).map_err(|e| format!("{log:?}: {e}"))?;
     let mut cmd = Command::new(&wine);
+    // своя группа процессов: игра не зависит от сигналов лоадера, а «остановить игру» может
+    // убить всю группу разом (wine и всё, что он породил)
+    cmd.process_group(0);
     cmd.current_dir(home).arg(host).stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?)).stderr(Stdio::from(log_file));
     if let Some(jdk) = launch["jdk"].as_str() {
         if home.join(jdk).join("bin").is_dir() {
@@ -757,15 +761,33 @@ pub fn sign_in(base: &str, login: &str, password: &str) -> Result<Auth, String> 
     })
 }
 
-/// Регистрация (`POST /api/register`, полей чуть больше) и сразу вход токеном — как на сайте,
-/// где после регистрации человек уже вошедший.
+/// Регистрация (`POST /api/register`) и сразу вход токеном — как на сайте, где после регистрации
+/// человек уже вошедший. Если аккаунт создан, а вход споткнулся (say, лимит попыток) — об этом
+/// сказано прямо: аккаунт есть, войти можно тем же логином и паролем.
 pub fn register(base: &str, login: &str, email: &str, password: &str) -> Result<Auth, String> {
     let body = serde_json::json!({ "login": login, "email": email, "password": password }).to_string();
     let (code, text) = curl_json("POST", &format!("{base}/register"), Some(&body), None)?;
     if code != 200 {
+        let word = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        if word == "login-taken" || word == "email-taken" {
+            // «занято» чаще всего значит, что это уже его аккаунт (прошлый заход удался)
+            return Err(format!(
+                "{} {}",
+                api_err(code, &text),
+                "— возможно, это уже твой аккаунт: попробуй войти, а не регистрировать его заново."
+            ));
+        }
         return Err(api_err(code, &text));
     }
-    sign_in(base, login, password)
+    match sign_in(base, login, password) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(format!(
+            "Аккаунт создан, но вход не вышел: {e}. Войди чуть позже — логин и пароль те же."
+        )),
+    }
 }
 
 /// Кто владеет токеном: `GET /api/me` с Bearer. 401 — сессия кончилась.
@@ -780,6 +802,25 @@ pub fn whoami(base: &str, token: &str) -> Result<Me, String> {
         login: v["login"].as_str().unwrap_or("").to_string(),
         since: v["since"].as_i64().unwrap_or(0),
     })
+}
+
+/// Игра уже идёт (запущена этим окном или другим)? По процессу wine с CursedRecode.exe.
+pub fn game_running() -> bool {
+    Command::new("pgrep")
+        .args(["-f", "CursedRecode.exe"])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Остановить игру: TERM всей её группе процессов (wine и всё, что он породил), через 3 с — KILL.
+/// Выход заметит on_tick (код 143/137 считаются нормальным закрытием).
+pub fn stop_game(pid: u32) {
+    let _ = Command::new("kill").arg("-TERM").arg(format!("-{pid}")).status();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
+    });
 }
 
 /// Сколько байт занимает папка (для экрана настроек).

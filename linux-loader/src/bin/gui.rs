@@ -675,7 +675,11 @@ impl Ui {
         };
         if let Some(status) = exited {
             self.child = None;
-            if !status.success() {
+            // 130/143 — game stopped by signal (our "Остановить игру" или Ctrl+C), 137 — KILL:
+            // это нормальное закрытие, а не ошибка. Wine нередко возвращает не-ноль и просто
+            // закрываясь — не пугаем понапрасну.
+            let stopped = matches!(status.code(), Some(130) | Some(137) | Some(143));
+            if !status.success() && !stopped {
                 let tail = self.log.tail(8).join("\n");
                 let title = self.t("Игра закрылась с ошибкой", "The game closed with an error");
                 let code = self.t("Код выхода:", "Exit code:");
@@ -761,9 +765,22 @@ impl Ui {
                     let title = self.t("Игра уже запущена", "The game is already running");
                     let text = self.t("Одна игра за раз: дождись, пока эта закроется.", "One game at a time: wait for this one to close.");
                     self.message(title, text);
+                } else if lib::game_running() {
+                    // запущена другим окном лоадера (или прошлым запуском, лоадер закрыли)
+                    let title = self.t("Игра уже идёт", "A game is already on");
+                    let text = self.t(
+                        "Процесс игры живёт вне этого окна — наверное, лоадер открыли заново. Пользуйся тем запуском или останови его (в игре или системой).",
+                        "The game's process lives outside this window — the launcher was probably opened again. Use that run or stop it (in the game or by the system).",
+                    );
+                    self.message(title, text);
                 } else {
                     self.choose();
                     self.begin_sync(true);
+                }
+            }
+            "stop-game" => {
+                if let Some(c) = &self.child {
+                    lib::stop_game(c.id());
                 }
             }
             "check-files" => {
@@ -787,6 +804,9 @@ impl Ui {
             }
             "open-folder" => {
                 let _ = std::process::Command::new("xdg-open").arg(&self.home).spawn();
+            }
+            "web" => {
+                let _ = std::process::Command::new("xdg-open").arg("https://kpanics.github.io/games/").spawn();
             }
             "site" => {
                 let _ = std::process::Command::new("xdg-open").arg("https://github.com/kpanics/games").spawn();
@@ -1073,6 +1093,10 @@ impl Ui {
                 self.txtext.draw(can, F::Mono, 12.5, x0, ly, DIM, &short);
                 ly += 18.0;
             }
+            // внизу: остановить (если игра не закрылась сама) и свернуть в меню
+            let by = h - CPAD - 46.0;
+            let y = self.button(can, x0, by - 56.0, 220.0, 46.0, 17.0, &self.t("Остановить игру", "Stop the game"), "stop-game", false);
+            self.button(can, x0, y, 220.0, 46.0, 17.0, &self.t("Свернуть в меню", "Back to the menu"), "back", false);
             return;
         }
 
@@ -1276,7 +1300,8 @@ impl Ui {
 
     fn tab_links(&mut self, can: &mut Canvas, x0: f32, _cw: f32, _w: f32, _h: f32) {
         let y = self.cap(can, x0, 64.0, &self.t("Ссылки", "Links"), 24.0);
-        let y = self.button(can, x0, y + 8.0, 340.0, 46.0, 17.0, &self.t("Сайт (GitHub)", "Site (GitHub)"), "site", false);
+        let y = self.button(can, x0, y + 8.0, 340.0, 46.0, 17.0, &self.t("Сайт", "The site"), "web", false);
+        let y = self.button(can, x0, y, 340.0, 46.0, 17.0, &self.t("GitHub", "GitHub"), "site", false);
         let y = self.button(can, x0, y, 340.0, 46.0, 17.0, &self.t("Сайт Cursed", "The Cursed site"), "cursed-site", false);
         let y = self.button(can, x0, y, 340.0, 46.0, 17.0, &self.t("Релизы", "Releases"), "releases", false);
         let _ = self.button(can, x0, y, 340.0, 46.0, 17.0, &self.t("Linux-инструкция", "Linux guide"), "docs", false);
