@@ -166,6 +166,8 @@ pub struct Settings {
     /// Вошедший аккаунт: UID и логин (логин идёт в игру как имя игрока).
     pub uid: i64,
     pub account: String,
+    /// Прорисовка игры в чанках: 0 - не трогать (как в игре), иначе 2..=32 - писать в options.txt.
+    pub render: u32,
 }
 
 impl Default for Settings {
@@ -179,6 +181,7 @@ impl Default for Settings {
             token: String::new(),
             uid: 0,
             account: String::new(),
+            render: 0,
         }
     }
 }
@@ -213,6 +216,9 @@ impl Settings {
                 if let Some(a) = v["account"].as_str() {
                     s.account = a.into();
                 }
+                if let Some(r) = v["render"].as_u64() {
+                    s.render = if (2..=32).contains(&r) { r as u32 } else { 0 };
+                }
             }
         }
         s
@@ -224,6 +230,7 @@ impl Settings {
         let v = serde_json::json!({
             "memory": self.memory, "lang": self.lang, "wine": self.wine, "home": self.home,
             "api": self.api, "token": self.token, "uid": self.uid, "account": self.account,
+            "render": self.render,
         });
         let tmp = dir.join("settings.tmp");
         if std::fs::write(&tmp, v.to_string()).is_ok() {
@@ -560,6 +567,26 @@ fn fill(s: &str, root_win: &str) -> String {
 /// ждут буквально: `--jdk` и нативная библиотека — абсолютные `C:\…` (относительный --jdk под Wine
 /// роняет загрузку jvm.dll, путь в $HOME — «could not find java.dll» нового режима путей Wine).
 /// Вывод игры — в `<home>/loader/game.log` (окно лоадера показывает его хвост).
+/// Прорисовка в options.txt игры (её `--gameDir` — сама папка игры): `renderDistance:N`. Строку
+/// меняем на месте, не задевая остальные настройки; файла нет — создаём с одной строкой (остальное
+/// игра допишет сама). Ошибки не фатальны: игра просто пойдёт со своей настройкой.
+fn apply_render_distance(home: &Path, render: u32) {
+    if !(2..=32).contains(&render) {
+        return;
+    }
+    let path = home.join("options.txt");
+    let line = format!("renderDistance:{render}");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out: Vec<&str> = text.lines().filter(|l| !l.is_empty() && !l.starts_with("renderDistance:")).collect();
+    out.push(&line);
+    let mut made = out.join("\n");
+    made.push('\n');
+    let _ = std::fs::create_dir_all(home);
+    if let Err(e) = std::fs::write(&path, made) {
+        eprintln!("options.txt: {e}");
+    }
+}
+
 pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&str>) -> Result<Child, String> {
     let wine = settings.wine_binary();
     let launch = &m.launch;
@@ -567,6 +594,7 @@ pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&st
     if !home.join(host).is_file() {
         return Err(format!("{host}: нет такого файла — сначала синхронизация"));
     }
+    apply_render_distance(home, settings.render);
     let root_win = windows_path(home, &wine)?;
     let log = home.join("loader").join("game.log");
     std::fs::create_dir_all(log.parent().unwrap_or(home)).map_err(|e| e.to_string())?;

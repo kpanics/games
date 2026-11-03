@@ -393,7 +393,8 @@ struct FieldEdit {
 #[derive(Clone, PartialEq)]
 enum Hit {
     Action(String),
-    Slider,
+    /// Какой это слайдер: 0 - память, 1 - прорисовка.
+    Slider(u8),
     Focus(Field),
 }
 
@@ -456,6 +457,8 @@ struct Ui {
     hits: Vec<(Rect, Hit)>,
     tick: u64,
     drag: bool,
+    /// Какой слайдер тянут (см. `Hit::Slider`).
+    slide_id: u8,
     /// Масштаб экрана (физические пиксели на логический).
     k: f32,
     /// Готовый фон: градиент пересчитывается только при смене размера окна.
@@ -737,18 +740,26 @@ impl Ui {
             match h {
                 Hit::Action(a) => self.on_action(&a),
                 Hit::Focus(f) => self.focus = Some(f),
-                Hit::Slider => {
+                Hit::Slider(id) => {
+                    self.slide_id = id;
                     self.drag = true;
-                    self.slide(mx, &r);
+                    self.slide(id, mx, &r);
                 }
             }
             return;
         }
     }
 
-    fn slide(&mut self, mx: f32, r: &Rect) {
+    fn slide(&mut self, id: u8, mx: f32, r: &Rect) {
         let k = ((mx - r.x) / r.w).clamp(0.0, 1.0);
-        self.settings.memory = ((2048.0 + k * (16384.0 - 2048.0)) / 256.0).round() as u32 * 256;
+        match id {
+            1 => {
+                // 0 - «как в игре» (не трогаем options.txt), дальше 2..=32
+                let pos = (k * 31.0).round() as u32;
+                self.settings.render = if pos == 0 { 0 } else { (pos + 1).min(32) };
+            }
+            _ => self.settings.memory = ((2048.0 + k * (16384.0 - 2048.0)) / 256.0).round() as u32 * 256,
+        }
         self.settings.save(&self.home);
     }
 
@@ -1294,11 +1305,30 @@ impl Ui {
                 let fill = (sw * part).max(6.0);
                 can.round(x0, sy, fill, 6.0, 3.0, MAIN_BG);
                 can.round(x0 + fill - 7.0, sy - 5.0, 14.0, 16.0, 7.0, MAIN_BG);
-                self.hits.push((Rect { x: x0, y: sy - 10.0, w: sw, h: 26.0 }, Hit::Slider));
+                self.hits.push((Rect { x: x0, y: sy - 10.0, w: sw, h: 26.0 }, Hit::Slider(0)));
                 for (i, line) in self.txtext.wrap(F::Reg, 12.5, &self.t("Сколько оперативной памяти получит игра.", "How much memory the game gets."), sw).into_iter().enumerate() {
                     self.txtext.draw(can, F::Reg, 12.5, x0, sy + 32.0 + i as f32 * 18.0, DIM, &line);
                 }
-                let y2 = sy + 80.0;
+                let y1 = sy + 96.0;
+                self.txtext.draw(can, F::Reg, 15.0, x0, y1 + 10.0, TEXT, &self.t("Прорисовка (чанков)", "Render distance (chunks)"));
+                let val = if self.settings.render == 0 {
+                    self.t("Как в игре", "As in the game")
+                } else {
+                    format!("{} {}", self.settings.render, self.t("чанков", "chunks"))
+                };
+                let vw = self.txtext.width(F::Mono, 14.0, &val);
+                self.txtext.draw(can, F::Mono, 14.0, x0 + sw - vw, y1 + 10.0, DIM, &val);
+                let sy1 = y1 + 42.0;
+                can.round(x0, sy1, sw, 6.0, 3.0, TRACK);
+                let part = if self.settings.render == 0 { 0.0 } else { (self.settings.render - 1) as f32 / 31.0 };
+                let fill = (sw * part).max(6.0);
+                can.round(x0, sy1, fill, 6.0, 3.0, MAIN_BG);
+                can.round(x0 + fill - 7.0, sy1 - 5.0, 14.0, 16.0, 7.0, MAIN_BG);
+                self.hits.push((Rect { x: x0, y: sy1 - 10.0, w: sw, h: 26.0 }, Hit::Slider(1)));
+                for (i, line) in self.txtext.wrap(F::Reg, 12.5, &self.t("Дальше 80 блоков рельеф рисуется упрощённо, поэтому 32 чанка почти не дороже 8. Видно всё равно не дальше, чем разрешает сервер.", "Past 80 blocks the terrain is drawn simplified, so 32 chunks cost little more than 8. You still can't see past the server's own limit."), sw).into_iter().enumerate() {
+                    self.txtext.draw(can, F::Reg, 12.5, x0, sy1 + 32.0 + i as f32 * 18.0, DIM, &line);
+                }
+                let y2 = sy1 + 96.0;
                 self.txtext.draw(can, F::Reg, 15.0, x0, y2 + 10.0, TEXT, &self.t("Язык", "Language"));
                 let lang_now = if self.settings.lang == "ru" { "Русский" } else { "English" };
                 let lw = self.txtext.width(F::Mono, 14.0, lang_now) + 28.0;
@@ -1529,8 +1559,10 @@ impl ApplicationHandler<Ticker> for App {
                 self.ui.mouse = (position.x as f32 / k, position.y as f32 / k);
                 if self.ui.drag {
                     for (r, h) in self.ui.hits.clone() {
-                        if h == Hit::Slider {
-                            self.ui.slide(self.ui.mouse.0, &r);
+                        if let Hit::Slider(id) = h {
+                            if id == self.ui.slide_id {
+                                self.ui.slide(id, self.ui.mouse.0, &r);
+                            }
                         }
                     }
                 }
@@ -1640,10 +1672,11 @@ fn main() {
         external_at: None,
         said_stop_at: None,
         form_note: None,
-        mouse: (-100.0, -100.0),
-        hits: Vec::new(),
-        tick: 0,
-        drag: false,
+                    mouse: (-100.0, -100.0),
+                    hits: Vec::new(),
+                    tick: 0,
+                    drag: false,
+                    slide_id: 0,
         k: 1.0,
         bg: Vec::new(),
         bg_w: 0,
