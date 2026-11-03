@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{mpsc, Arc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cursed_linux_loader as lib;
 use freetype::face::LoadFlag;
@@ -282,11 +282,12 @@ impl<'a> Canvas<'a> {
 
     /// Затемнение всего кадра (полупрозрачная вуаль под панелью поверх вкладок).
     fn veil(&mut self, a: u8) {
-        let black = rgb(0, 0, 0);
-        for y in 0..self.h as i64 {
-            for x in 0..self.w as i64 {
-                self.blend(x, y, black, a);
-            }
+        // затемнение чёрным: один проход по кадру, без вызова blend на каждый пиксель
+        let inv = (255 - a) as u32;
+        for px in self.buf.iter_mut() {
+            let v = *px;
+            let mix = |c: u32| (c * inv + 127) / 255;
+            *px = (mix((v >> 16) & 255) << 16) | (mix((v >> 8) & 255) << 8) | mix(v & 255);
         }
     }
 }
@@ -444,6 +445,11 @@ struct Ui {
     reg_pass: String,
     focus: Option<Field>,
     auth_busy: bool,
+    /// Игра идёт вне этого окна (лоадер открыли заново) — когда её проверяли в последний раз.
+    external_game: bool,
+    external_at: Option<Instant>,
+    /// Игра попрощалась в логе, но процесс ещё жив (wine висит) — с какого момента.
+    said_stop_at: Option<Instant>,
     /// Строка под формами: (текст, ошибка ли).
     form_note: Option<(String, bool)>,
     mouse: (f32, f32),
@@ -685,7 +691,39 @@ impl Ui {
                 let code = self.t("Код выхода:", "Exit code:");
                 self.message(title, format!("{code} {}.\n\n{}", status.code().unwrap_or(-1), tail));
             }
+            // если после ухода игры её процессы висят (под Wine так бывает) — убрать их,
+            // чтобы следующий «Играть» не спотыкался
+            lib::cleanup_game();
+            self.external_game = false;
+            self.external_at = None;
+            self.said_stop_at = None;
             changed = true;
+        }
+        // игра попрощалась в логе, а процесс жив: даём wine 6 секунд выйти самому, потом вливаем
+        if let Some(c) = &self.child {
+            self.log.tail(1); // дочитать новое: маркеры закрытия собираются здесь
+            if self.log.said_stop() && self.said_stop_at.is_none() {
+                self.said_stop_at = Some(Instant::now());
+            }
+            if let Some(at) = self.said_stop_at {
+                if at.elapsed() > Duration::from_secs(6) {
+                    lib::stop_game(c.id());
+                    self.said_stop_at = None;
+                    changed = true;
+                }
+            }
+        } else {
+            self.said_stop_at = None;
+            // раз в 2 секунды смотрим, не идёт ли игра вне этого окна (лоадер открыли заново)
+            let fresh = self.external_at.is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+            if !fresh {
+                self.external_at = Some(Instant::now());
+                let was = self.external_game;
+                self.external_game = lib::game_running();
+                if was != self.external_game {
+                    changed = true;
+                }
+            }
         }
         changed
     }
@@ -765,14 +803,10 @@ impl Ui {
                     let title = self.t("Игра уже запущена", "The game is already running");
                     let text = self.t("Одна игра за раз: дождись, пока эта закроется.", "One game at a time: wait for this one to close.");
                     self.message(title, text);
-                } else if lib::game_running() {
-                    // запущена другим окном лоадера (или прошлым запуском, лоадер закрыли)
-                    let title = self.t("Игра уже идёт", "A game is already on");
-                    let text = self.t(
-                        "Процесс игры живёт вне этого окна — наверное, лоадер открыли заново. Пользуйся тем запуском или останови его (в игре или системой).",
-                        "The game's process lives outside this window — the launcher was probably opened again. Use that run or stop it (in the game or by the system).",
-                    );
-                    self.message(title, text);
+                } else if self.external_game || lib::game_running() {
+                    // запущена другим окном лоадера (или прошлым запуском, лоадер закрыли):
+                    // на вкладке Играть есть блок с остановкой
+                    self.tab = Tab::Play;
                 } else {
                     self.choose();
                     self.begin_sync(true);
@@ -782,6 +816,11 @@ impl Ui {
                 if let Some(c) = &self.child {
                     lib::stop_game(c.id());
                 }
+            }
+            "stop-external" => {
+                lib::stop_external_game();
+                self.external_game = false;
+                self.external_at = None;
             }
             "check-files" => {
                 self.folder_bytes = None;
@@ -1097,6 +1136,20 @@ impl Ui {
             let by = h - CPAD - 46.0;
             let y = self.button(can, x0, by - 56.0, 220.0, 46.0, 17.0, &self.t("Остановить игру", "Stop the game"), "stop-game", false);
             self.button(can, x0, y, 220.0, 46.0, 17.0, &self.t("Свернуть в меню", "Back to the menu"), "back", false);
+            return;
+        }
+
+        // игра идёт вне этого окна (лоадер открыли заново, прошлый запуск жив)
+        if self.external_game {
+            let y = self.cap(can, x0, 130.0, &self.t("Игра уже идёт", "A game is already on"), 26.0);
+            let sub = self.t(
+                "Процесс игры живёт вне этого окна — наверное, лоадер открыли заново. Можно пользоваться тем запуском или остановить его отсюда и запустить снова.",
+                "The game's process lives outside this window — the launcher was probably opened again. Use that run, or stop it here and start again.",
+            );
+            for (i, line) in self.txtext.wrap(F::Reg, 14.0, &sub, w - RAIL_W - CPAD * 2.0).into_iter().enumerate() {
+                self.txtext.draw(can, F::Reg, 14.0, x0, y + i as f32 * 21.0, DIM, &line);
+            }
+            self.button(can, x0, y + 68.0, 260.0, 46.0, 17.0, &self.t("Остановить ту игру", "Stop that game"), "stop-external", false);
             return;
         }
 
@@ -1583,6 +1636,9 @@ fn main() {
         reg_pass: String::new(),
         focus: None,
         auth_busy: false,
+        external_game: false,
+        external_at: None,
+        said_stop_at: None,
         form_note: None,
         mouse: (-100.0, -100.0),
         hits: Vec::new(),

@@ -639,11 +639,14 @@ pub struct LogFollow {
     offset: u64,
     lines: VecDeque<String>,
     pending: Vec<u8>,
+    /// Игра сама попрощалась в логе («Stopping!»): под Wine процессы после этого могут
+    /// ещё висеть — лоадер даёт им секунды и останавливает сам.
+    stopped: bool,
 }
 
 impl LogFollow {
     pub fn new(home: &Path) -> LogFollow {
-        LogFollow { path: home.join("loader").join("game.log"), offset: 0, lines: VecDeque::new(), pending: Vec::new() }
+        LogFollow { path: home.join("loader").join("game.log"), offset: 0, lines: VecDeque::new(), pending: Vec::new(), stopped: false }
     }
 
     /// Последние `keep` строк: что дописалось с прошлого раза — дочитано и поднято.
@@ -655,6 +658,7 @@ impl LogFollow {
             self.offset = 0;
             self.lines.clear();
             self.pending.clear();
+            self.stopped = false;
         }
         if len > self.offset {
             if let Ok(mut f) = std::fs::File::open(&self.path) {
@@ -671,6 +675,9 @@ impl LogFollow {
         // всегда можно); хвост без перевода — ждать следующих байтов
         if let Some(at) = self.pending.iter().rposition(|&b| b == b'\n') {
             for l in String::from_utf8_lossy(&self.pending[..=at]).lines() {
+                if l.contains("Stopping!") || l.contains("the window closed in") {
+                    self.stopped = true;
+                }
                 self.lines.push_back(l.to_string());
             }
             self.pending.drain(..=at);
@@ -679,6 +686,11 @@ impl LogFollow {
             self.lines.pop_front();
         }
         self.lines.iter().rev().take(keep).rev().cloned().collect()
+    }
+
+    /// Игра сама закрылась (попрощалась в логе)?
+    pub fn said_stop(&self) -> bool {
+        self.stopped
     }
 }
 
@@ -821,6 +833,24 @@ pub fn stop_game(pid: u32) {
         std::thread::sleep(Duration::from_secs(3));
         let _ = Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
     });
+}
+
+/// Остановить игру, запущенную вне этого окна (лоадер открыли заново): по строке команды,
+/// TERM, через 3 с — KILL.
+pub fn stop_external_game() {
+    let _ = Command::new("pkill").arg("-TERM").arg("-f").arg("CursedRecode.exe").status();
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = Command::new("pkill").arg("-KILL").arg("-f").arg("CursedRecode.exe").status();
+    });
+}
+
+/// После ухода игры: если её процессы висят (под Wine окно закрыто, а процессы живут) — убрать их,
+/// чтобы следующий запуск не спотыкался.
+pub fn cleanup_game() {
+    if game_running() {
+        stop_external_game();
+    }
 }
 
 /// Сколько байт занимает папка (для экрана настроек).

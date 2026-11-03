@@ -289,12 +289,16 @@ impl Multi {
             let open = self.via == Some(i);
             let ch_hot = m.an(hid(k::LIST, 8, i as u32), if live && self.drag.is_none() && (m.over(chip) || open) { 1.0 } else { 0.0 }, 8.0);
             let manual = chosen_v > 0;
-            c.rect(chip, ch_h / 2.0, grey(1.0, (0.05 + 0.08 * ch_hot) * q));
+            // the chip's rim: a slightly larger rounded plate under it, so the chip reads as a button
+            // (it opens the version list — Via)
+            let rim = 0.32 * vh;
+            c.rect([chip[0] - rim, chip[1] - rim, chip[2] + rim, chip[3] + rim], ch_h / 2.0 + rim, grey(1.0, (0.13 + 0.11 * ch_hot) * q));
+            c.rect(chip, ch_h / 2.0, grey(1.0, (0.06 + 0.10 * ch_hot) * q));
             if manual {
                 // chosen by hand: a lamp under it
                 c.light(chip[0] + 0.5 * ch_h, chip[3] - 1.0, chip[2] - 0.5 * ch_h, 0.6 * q, 0.0, 1.0, 0.7, ui);
             }
-            let tb = (if manual { 0.86 } else { 0.52 }) + (if manual { 0.14 } else { 0.3 }) * ch_hot;
+            let tb = (if manual { 0.86 } else { 0.70 }) + (if manual { 0.14 } else { 0.22 }) * ch_hot;
             m.rising_text(c, Face::Caps, &chip_text, chip[0] + 1.05 * csize, cmid - 0.65 * csize, csize, 1.3, 0.1, grey(tb, 1.0), 0.0, q);
             // its arrow: down, up while the list is open
             let turn = m.an(hid(k::LIST, 9, i as u32), if open { 1.0 } else { 0.0 }, 10.0);

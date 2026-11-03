@@ -7,7 +7,7 @@
 # AUR-стиль: источник — ветка main этого репозитория; собирается rust-бинaries linux-loader/.
 
 pkgname=cursed-recode
-pkgver=0.4.1
+pkgver=0.4.2
 pkgrel=1
 pkgdesc='Лаунчер Cursed Recode для Linux: вкладки, новости, аккаунты; игра под Wine'
 arch=('x86_64')
