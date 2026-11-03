@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cursed Recode</title>
+<meta name="description" content="Клиент и движок Cursed Recode: лоадер с подписанным дистрибутивом на GitHub, нативное окно на Linux, игра под Wine.">
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <a class="brand" href="./">
+    <img src="assets/icon.png" alt="" width="28" height="28">
+    <span>Cursed&nbsp;Recode</span>
+  </a>
+  <nav>
+    <a href="#what">Что это</a>
+    <a href="#download">Скачать</a>
+    <a href="#linux">Linux</a>
+    <a href="#inside">Как устроено</a>
+    <a class="gh" href="https://github.com/kpanics/games">GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+<section class="hero">
+  <h1>Cursed&nbsp;Recode</h1>
+  <p class="tagline">Клиент и движок. Дистрибутив — на GitHub: один подписанный манифест,
+  файлы по SHA-256, ассеты Mojang. Лоадер проверяет каждую цифру перед запуском.</p>
+  <p class="buttons">
+    <a class="btn main" href="https://github.com/kpanics/games/releases/download/dist/recode_loader.exe">Скачать для Windows</a>
+    <a class="btn" href="#linux">Запуск на Linux</a>
+    <a class="btn ghost" href="https://github.com/kpanics/games">GitHub</a>
+  </p>
+  <p class="fine">Windows: recode_loader.exe (≈11&nbsp;МБ) — дальше сам скачает игру и запустит её.<br>
+  Linux: нативное окно лоадера, игра идёт под Wine.</p>
+</section>
+
+<section id="what">
+  <h2>Что это</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>Лоадер</h3>
+      <p>На Windows — recode_loader.exe. На Linux — своё нативное окно (вкладки, новости,
+      аккаунты) без единого Win32-вызова. Один и тот же протокол дистрибутива.</p>
+    </div>
+    <div class="card">
+      <h3>Движок</h3>
+      <p>Vulkan, свой рендер и интерфейс. На Linux проводится к драйверу через winevulkan —
+      движок не портирован и не должен был: он работает как есть.</p>
+    </div>
+    <div class="card">
+      <h3>Аккаунты</h3>
+      <p>Регистрация и вход — через API cursedclient.xyz (сайт и форум там же). Вошедший логин
+      становится именем игрока. Без входа игрок — «Player».</p>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <h2>Скачать</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>Windows</h3>
+      <p><a class="btn main" href="https://github.com/kpanics/games/releases/download/dist/recode_loader.exe">recode_loader.exe</a></p>
+      <p class="fine">Из релиза <a href="https://github.com/kpanics/games/releases/tag/dist">dist</a>. Запусти — лоадер сам выберет папку, скачает билд и ассеты, и запустит игру.</p>
+    </div>
+    <div class="card">
+      <h3>Linux</h3>
+      <p><a class="btn" href="#linux">Три способа запуска</a></p>
+      <p class="fine">Пакет для CachyOS/Arch, сборка из исходников или готовый набор из CI.</p>
+    </div>
+  </div>
+</section>
+
+<section id="linux">
+  <h2>Linux (CachyOS)</h2>
+  <p class="tagline">Игра — Windows-бинарни и идёт под Wine; всё остальное (окно, синк, запуск) — нативное.
+  Лоадер сам кладёт игру на «диск&nbsp;C:» префикса, передаёт хосту абсолютные <code>C:\</code>-пути
+  и копирует VC-рантаймы рядом с бинарями. Нужны пакеты <code>wine</code>, <code>curl</code>,
+  <code>freetype2</code> и видеокарта с Vulkan.</p>
+
+  <h3>Пакетом</h3>
+  <pre><code>git clone https://github.com/kpanics/games.git
+cd games/packaging
+makepkg -si
+cursed-recode</code></pre>
+
+  <h3>Из исходников</h3>
+  <pre><code>git clone https://github.com/kpanics/games.git
+cd games/linux-loader
+cargo build --release
+./target/release/cursed-recode-gui</code></pre>
+
+  <h3>Готовым набором из CI</h3>
+  <p>Артефакт <code>cursed-recode-linux</code> любого зелёного
+  <a href="https://github.com/kpanics/games/actions">прогона</a>: распаковать и запустить
+  <code>./cursed-recode</code>.</p>
+
+  <p class="fine">Подробности и диагностика — <a href="https://github.com/kpanics/games/blob/main/docs/CACHYOS.md">docs/CACHYOS.md</a>.</p>
+</section>
+
+<section id="inside">
+  <h2>Как устроено</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>Подпись</h3>
+      <p>Манифест <code>start.json</code> подписан ed25519; лоадер не примет билд, чья подпись
+      или чей хоть один хеш не сошёлся.</p>
+    </div>
+    <div class="card">
+      <h3>Файлы</h3>
+      <p>Каждый файл билда лежит в релизе-складе как <code>object-&lt;sha256&gt;</code> и качается
+      по своему хешу; ассеты — с CDN Mojang по SHA-1, как у самой игры.</p>
+    </div>
+    <div class="card">
+      <h3>Сборка</h3>
+      <p>CI собирает всё сам: мод, движок, лоадер — и публикует два релиза: чистую витрину
+      <code>dist</code> и технический склад <code>dist-objects</code>.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p><a href="https://github.com/kpanics/games">kpanics/games</a> ·
+     <a href="https://github.com/kpanics/games/releases">релизы</a> ·
+     <a href="https://github.com/kpanics/games/blob/main/docs/CACHYOS.md">Linux-инструкция</a> ·
+     <a href="https://cursedclient.xyz">cursedclient.xyz</a></p>
+  <p class="fine">Cursed Recode — произведение Lunuca (MIT с указанием автора). Дистрибутив и лоадер — kpanics.
+  Minecraft — Mojang; ассеты качаются с их CDN.</p>
+</footer>
+
+</body>
+</html>

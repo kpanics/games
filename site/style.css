@@ -1,0 +1,186 @@
+/* Cursed Recode — промо-страница. Тёмная, Geist — как окно лоадера. */
+
+@font-face {
+  font-family: "Geist";
+  src: url("assets/fonts/geist_400.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("assets/fonts/geist_600.ttf") format("truetype");
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("assets/fonts/geistmono_500.ttf") format("truetype");
+  font-weight: 500;
+  font-display: swap;
+}
+
+:root {
+  --bg-top: #0a0c11;
+  --bg-bot: #11141d;
+  --panel: #171a21;
+  --edge: #2c313f;
+  --text: #e8eaf0;
+  --dim: #949baa;
+  --main: #e8eaf0;
+  --main-text: #10131a;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  font-family: "Geist", system-ui, sans-serif;
+  color: var(--text);
+  background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bot) 100%) fixed;
+  line-height: 1.55;
+}
+
+header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 28px;
+  background: rgba(10, 12, 17, 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(44, 49, 63, 0.6);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 17px;
+}
+
+nav { display: flex; gap: 20px; flex-wrap: wrap; }
+
+nav a {
+  color: var(--dim);
+  text-decoration: none;
+  font-size: 14.5px;
+}
+nav a:hover { color: var(--text); }
+nav a.gh { color: var(--text); }
+
+main { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+
+section { padding: 56px 0 8px; }
+
+h1 {
+  font-size: clamp(40px, 7vw, 64px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 40px 0 12px;
+}
+
+h2 {
+  font-size: 26px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+h3 {
+  font-size: 16.5px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.tagline {
+  color: var(--dim);
+  font-size: 17.5px;
+  max-width: 640px;
+  margin: 0 0 24px;
+}
+
+.fine { color: var(--dim); font-size: 13.5px; }
+.fine a, p a { color: var(--text); }
+
+code, pre {
+  font-family: "Geist Mono", ui-monospace, monospace;
+}
+
+code {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 0.9em;
+}
+
+pre {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 16px 20px;
+  overflow-x: auto;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.buttons { display: flex; gap: 12px; flex-wrap: wrap; margin: 0 0 18px; }
+
+.btn {
+  display: inline-block;
+  padding: 12px 22px;
+  border-radius: 10px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 15.5px;
+  font-weight: 600;
+}
+.btn:hover { background: #1e222c; }
+.btn.main {
+  background: var(--main);
+  color: var(--main-text);
+  border-color: var(--main);
+}
+.btn.main:hover { background: #ffffff; }
+.btn.ghost { background: transparent; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin: 8px 0 24px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  padding: 20px 22px;
+}
+.card p { margin: 8px 0; color: var(--dim); font-size: 14.5px; }
+.card .btn { padding: 9px 16px; font-size: 14px; }
+
+footer {
+  margin-top: 64px;
+  padding: 28px;
+  border-top: 1px solid rgba(44, 49, 63, 0.6);
+  text-align: center;
+  color: var(--dim);
+  font-size: 14px;
+}
+footer a { color: var(--text); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+footer .fine { max-width: 640px; margin: 10px auto 0; }
+
+@media (max-width: 640px) {
+  nav { gap: 12px; }
+  section { padding-top: 40px; }
+}
