@@ -2,6 +2,7 @@ package cursed.recode.mixin.client;
 
 import com.google.common.collect.ImmutableSet;
 import cursed.recode.OwnPack;
+import cursed.recode.UserPack;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
@@ -34,13 +35,15 @@ public abstract class PackRepositoryMixin {
         if (OwnPack.wanted() && Arrays.stream(given).anyMatch(s -> s instanceof ClientPackSource)) {
             Set<RepositorySource> all = new LinkedHashSet<>(this.sources);
             all.add(OwnPack::load);
+            // the player's own (the swords' models): always in the repository — the folder may appear at any time
+            all.add(UserPack::load);
             this.sources = ImmutableSet.copyOf(all);
         }
     }
 
     @Inject(method = "rebuildSelected", at = @At("RETURN"), cancellable = true)
     private void cursed$placed(Collection<String> names, CallbackInfoReturnable<List<Pack>> cir) {
-        List<Pack> placed = OwnPack.placed(cir.getReturnValue());
+        List<Pack> placed = UserPack.placed(OwnPack.placed(cir.getReturnValue()));
         if (placed != cir.getReturnValue()) {
             cir.setReturnValue(placed);
         }

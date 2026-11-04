@@ -58,6 +58,7 @@ mod adapt;
 mod mask;
 mod streamer;
 mod killfx;
+mod swords;
 mod nosound;
 mod nametags;
 mod fakeplayer;
@@ -1565,6 +1566,10 @@ impl Gui {
         let reveal = (opened / 0.6).clamp(0.0, 1.0);
         c.rect(rr, r, grey(1.0, 0.05));
         let Owner::Module(i) = o else { return };
+        // the swords' models: the folder may have gained a model since it was read
+        if self.mods[i].id == swords::MODULE {
+            self.swords_refresh();
+        }
         self.hits.push((rr, Hit::Panel(i)));
         let m = self.head(i);
         let previews = self.previews();
@@ -2192,6 +2197,8 @@ impl Gui {
             self.hud.lit.insert(i, self.hud.lit_seq);
         }
         self.switch_sound(self.mods[i].on, 1.0);
+        // the swords' models: off puts the game's own swords back, on the chosen model
+        self.swords_toggle(i);
     }
 
     fn expand(&mut self, i: usize) {
@@ -2492,6 +2499,7 @@ impl Gui {
                 if graphics {
                     self.apply_preset(oi);
                 }
+                self.swords_pick(owner);
                 self.sound_tick(0.5);
             }
             Hit::Drop(si) => {
@@ -2528,6 +2536,7 @@ impl Gui {
                     if graphics {
                         self.apply_preset(oi);
                     }
+                    self.swords_pick(owner);
                 }
                 self.pop = None;
                 self.sound_tick(0.5);
@@ -2628,6 +2637,7 @@ impl Gui {
                 self.close(false);
             }
             "Edit the swing" => self.swing_open(),
+            "Open the models folder" => self.swords_folder(),
             "Show the tour" => {
                 self.tour_start();
                 return;
@@ -3701,6 +3711,8 @@ pub fn open(w: f32, h: f32, player: &str, dir: &str) {
         if !dir.is_empty() {
             g.dir = Some(std::path::PathBuf::from(dir));
         }
+        // the swords' models: the game's place learned (their folder read, the choice put to what was applied)
+        g.swords_refresh();
         g.open_menu(w, h)
     })
 }
