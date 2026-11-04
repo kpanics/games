@@ -26,6 +26,8 @@ public final class GuiAsks {
                 case "copy" -> mc.keyboardHandler.setClipboard(arg);
                 case "paste" -> Native.guiCall("paste\t" + mc.keyboardHandler.getClipboard());
                 case "lang" -> cursed.recode.menus.MenuHost.language(arg);
+                // the swords' models: the pack written and the resources reloaded (cursed.recode.Swords)
+                case "sword" -> cursed.recode.Swords.apply(mc, arg);
                 case "chat" -> cursed.recode.hud.NChat.act(arg);
                 case "langs" -> {
                     // code, name, region: a language each (fields by U+1F, languages by U+1E)

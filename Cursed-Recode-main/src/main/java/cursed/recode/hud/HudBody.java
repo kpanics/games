@@ -3,6 +3,8 @@ package cursed.recode.hud;
 import java.util.List;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.HumanoidArm;
@@ -124,7 +126,25 @@ public final class HudBody {
             n.add(s.isEmpty() ? 0.0 : (double) cd.getCooldownPercent(s, partial));
         }
         String name = held.isEmpty() ? "" : held.getHoverName().getString();
+        // a server's own item (its name, its lore, a model or data of its own): said so by the held name —
+        // what the item really is, marked, instead of the server's word for it alone
+        String mark = held.isEmpty() ? "" : custom(held);
+        if (!mark.isEmpty()) {
+            name = mark + "  " + name;
+        }
         text.append(name.replace('\n', ' ')).append('\n');
+    }
+
+    /** What says a server made this item its own: its own name or lore, a model of its own, data of its own — «✦ <id>», empty when it did not. */
+    private static String custom(ItemStack s) {
+        boolean custom = s.has(DataComponents.CUSTOM_NAME) || s.has(DataComponents.LORE)
+                || s.has(DataComponents.CUSTOM_MODEL_DATA) || s.has(DataComponents.CUSTOM_DATA);
+        if (!custom) {
+            return "";
+        }
+        var id = BuiltInRegistries.ITEM.getKey(s.getItem());
+        String n = id == null ? s.getItem().toString() : id.toString();
+        return "✦ " + n.replace("minecraft:", "");
     }
 
     /** A slot's item where the HUD left room for it (the icons of kind 9: 0..8 the hotbar, 9 the off hand). */

@@ -168,6 +168,8 @@ pub struct Settings {
     pub account: String,
     /// Прорисовка игры в чанках: 0 - не трогать (как в игре), иначе 2..=32 - писать в options.txt.
     pub render: u32,
+    /// Свои модели мечей в игре (меню → Render → Swords): выкл - CURSED_SWORDS=0, клиент их не трогает.
+    pub swords: bool,
 }
 
 impl Default for Settings {
@@ -182,6 +184,7 @@ impl Default for Settings {
             uid: 0,
             account: String::new(),
             render: 0,
+            swords: true,
         }
     }
 }
@@ -219,6 +222,9 @@ impl Settings {
                 if let Some(r) = v["render"].as_u64() {
                     s.render = if (2..=32).contains(&r) { r as u32 } else { 0 };
                 }
+                if let Some(b) = v["swords"].as_bool() {
+                    s.swords = b;
+                }
             }
         }
         s
@@ -230,7 +236,7 @@ impl Settings {
         let v = serde_json::json!({
             "memory": self.memory, "lang": self.lang, "wine": self.wine, "home": self.home,
             "api": self.api, "token": self.token, "uid": self.uid, "account": self.account,
-            "render": self.render,
+            "render": self.render, "swords": self.swords,
         });
         let tmp = dir.join("settings.tmp");
         if std::fs::write(&tmp, v.to_string()).is_ok() {
@@ -612,6 +618,12 @@ pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&st
     }
     let least = launch["memory"]["least"].as_u64().unwrap_or(2048) as u32;
     cmd.arg(format!("-Xmx{}m", settings.memory.max(least)));
+    // GC: покороче паузы - плавнее кадры (рисует нативный движок, но тики, логика и звук - Java);
+    // PerfDisableSharedMem - jstat не пишет в /tmp каждую секунду (лаг-спайки на некоторых ядрах)
+    for flag in ["-XX:+UseG1GC", "-XX:G1NewSizePercent=20", "-XX:G1ReservePercent=20", "-XX:MaxGCPauseMillis=40",
+                 "-XX:+UnlockExperimentalVMOptions", "-XX:+DisableExplicitGC", "-XX:+PerfDisableSharedMem"] {
+        cmd.arg(flag);
+    }
     if let Some(nat) = launch["jvm"].as_array().and_then(|a| {
         a.iter().filter_map(|x| x.as_str()).find_map(|s| s.strip_prefix("-Dcursed.recode.native="))
     }) {
@@ -646,6 +658,10 @@ pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&st
         cmd.arg("--quickPlayMultiplayer").arg(s);
     }
     cmd.env("CURSED_BUILD", m.build.to_string());
+    // свои модели мечей: выкл в настройках лоадера - клиент игровые мечи не трогает
+    cmd.env("CURSED_SWORDS", if settings.swords { "1" } else { "0" });
+    // без отладочных сообщений wine (fixme/err в логе - шум и лишняя работа; свои строки игра пишет как писала)
+    cmd.env("WINEDEBUG", "-all");
     cmd.spawn().map_err(|e| format!("wine не запускается: {e} (пакет wine установлен?)"))
 }
 

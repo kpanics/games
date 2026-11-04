@@ -533,6 +533,7 @@ pub fn modules() -> Vec<Module> {
         md(wd, Some("Effects"), "chunk-animator", "Chunk Animator", false, None, "The world comes into sight moving in, a piece at a time, as it loads.",
             vec![c("Style", "Rise", &["Rise", "Fall", "Grow"]), s("Length", 0.2, 3.0, 0.05, 0.8, " s")]),
         md(vi, Some("Effects"), "custom-pet", "Custom Pet", false, None, "A companion of your own by your side, drawn by the client itself.", vec![c("Pet", "Jellyfish", &["Jellyfish", "Wisp"]), t("Follows closely", true)]),
+        md(vi, Some("Effects"), "sword-model", "Swords", false, None, "A custom 3D model in place of the game's swords, of your own: a folder with model.json in it (Blockbench saves a «Java Item Model» so), its pictures in textures/ beside it; the game's own holding when the model has none of its own. A server's own swords (a server pack's models) draw as the server made them: yours takes only the game's.", vec![c("Model", "Vanilla", &["Vanilla"]), act("Open the models folder")]),
         // ---- Render · Interface
         md(vi, Some("Interface"), "shulker-preview", "Shulker Preview", false, None, "What a shulker box holds, seen without opening it: a grid in its colour under its name in the inventory; over a box you look at on the ground or in a frame, and over a placed one you have opened before; the ender chest as you saw it last.",
             vec![
