@@ -1346,9 +1346,9 @@ impl Ui {
                 } else {
                     (self.t("Выкл", "Off"), DIM)
                 };
-                let scw = self.txtext.width(F::Mono, 14.0, s_now) + 28.0;
+                let scw = self.txtext.width(F::Mono, 14.0, &s_now) + 28.0;
                 can.round(x0 + sw - scw, y3, scw, 34.0, 8.0, PANEL);
-                self.txtext.draw(can, F::Mono, 14.0, x0 + sw - scw + 14.0, y3 + 19.0, s_col, s_now);
+                self.txtext.draw(can, F::Mono, 14.0, x0 + sw - scw + 14.0, y3 + 19.0, s_col, &s_now);
                 self.hits.push((Rect { x: x0 + sw - scw, y: y3, w: scw, h: 34.0 }, Hit::Action("swords".into())));
                 for (i, line) in self.txtext.wrap(F::Reg, 12.5, &self.t("Свои 3D-модели вместо игровых мечей: папка cursed-recode/swords в папке игры, выбор — в игре (Render → Swords).", "Custom 3D models in place of the game's swords: the cursed-recode/swords folder in the game's folder, chosen in game (Render → Swords)."), sw).into_iter().enumerate() {
                     self.txtext.draw(can, F::Reg, 12.5, x0, y3 + 44.0 + i as f32 * 18.0, DIM, &line);

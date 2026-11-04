@@ -81,6 +81,9 @@ impl Gui {
         let names = leak(&scan(self));
         let applied = applied(self);
         if let Some(m) = self.mods.iter_mut().find(|m| m.id == MODULE) {
+            // the switch first (the choice's names go into the settings below): on while a model of ours
+            // is applied (the pack on the disk is the truth)
+            m.on = names.contains(&applied.as_str()) && applied != "Vanilla";
             if let Some(s) = m.set.iter_mut().find(|s| s.label == LABEL) {
                 let cur = match &s.kind {
                     Kind::Choice { v, opts } => opts.get(*v).copied().unwrap_or("Vanilla"),
@@ -98,8 +101,6 @@ impl Gui {
                 s.kind = Kind::Choice { v, opts: names.clone() };
                 s.def = Kind::Choice { v: 0, opts: names };
             }
-            // the switch: on while a model of ours is applied (the pack on the disk is the truth)
-            m.on = names.contains(&applied.as_str()) && applied != "Vanilla";
         }
     }
 
