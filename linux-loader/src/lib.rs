@@ -593,6 +593,24 @@ fn apply_render_distance(home: &Path, render: u32) {
     }
 }
 
+/// Свои моды (Fabric, под версию игры): jar-файлы из `<home>/cursed-recode/mods`, по алфавиту. Fabric-загрузчик
+/// сам их находит по класспасу и поднимает (входные точки, миксины) - как сам клиент. Мод не под эту версию
+/// может не дать игре подняться - убрать его из папки.
+pub fn mods_jars(home: &Path) -> Vec<PathBuf> {
+    let dir = home.join("cursed-recode").join("mods");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut jars: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(list) => list
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jar")))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    jars.sort();
+    jars
+}
+
 pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&str>) -> Result<Child, String> {
     let wine = settings.wine_binary();
     let launch = &m.launch;
@@ -638,15 +656,20 @@ pub fn launch(home: &Path, m: &Manifest, settings: &Settings, server: Option<&st
         }
         cmd.arg(fill(a, &root_win));
     }
-    let cp = launch["classpath"]
+    let mut cp = launch["classpath"]
         .as_array()
         .ok_or("launch: classpath")?
         .iter()
         .filter_map(|p| p.as_str())
         .map(|p| fill(p, &root_win))
-        .collect::<Vec<String>>()
-        .join(";");
-    cmd.arg("-cp").arg(cp).arg(launch["main"].as_str().ok_or("launch: main")?);
+        .collect::<Vec<String>>();
+    // свои моды - после штатного класспаса (Fabric-моды под эту версию игры; Simple Voice Chat и другие)
+    for jar in mods_jars(home) {
+        if let Ok(win) = windows_path(&jar, &wine) {
+            cp.push(win);
+        }
+    }
+    cmd.arg("-cp").arg(cp.join(";")).arg(launch["main"].as_str().ok_or("launch: main")?);
     // --assetIndex/--assetsDir/--gameDir уже в аргументах билда (манифест)
     for a in launch["game"].as_array().into_iter().flatten().filter_map(|a| a.as_str()) {
         cmd.arg(fill(a, &root_win));

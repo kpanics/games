@@ -859,6 +859,11 @@ impl Ui {
             "open-folder" => {
                 let _ = std::process::Command::new("xdg-open").arg(&self.home).spawn();
             }
+            "open-mods" => {
+                let dir = self.home.join("cursed-recode").join("mods");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+            }
             "web" => {
                 let _ = std::process::Command::new("xdg-open").arg("https://kpanics.github.io/games/").spawn();
             }
@@ -1393,7 +1398,24 @@ impl Ui {
                 let y = y + 70.0;
                 let y = self.button(can, x0, y, sw, 46.0, 17.0, &self.t("Открыть папку", "Open the folder"), "open-folder", false);
                 let y = self.button(can, x0, y, sw, 46.0, 17.0, &self.t("Проверить файлы", "Check the files"), "check-files", false);
-                let _ = self.button(can, x0, y, sw, 46.0, 17.0, &self.t("Сменить папку", "Another folder"), "change-folder", false);
+                let y = self.button(can, x0, y, sw, 46.0, 17.0, &self.t("Сменить папку", "Another folder"), "change-folder", false);
+                let y = y + 30.0;
+                self.txtext.draw(can, F::Reg, 15.0, x0, y + 10.0, TEXT, &self.t("Моды (Fabric)", "Mods (Fabric)"));
+                let n = lib::mods_jars(&self.home).len();
+                let count = if n == 0 {
+                    self.t("пусто", "none")
+                } else {
+                    let m = self.t("модов", "mods");
+                    format!("{n} {m}")
+                };
+                let cw2 = self.txtext.width(F::Mono, 14.0, &count) + 28.0;
+                can.round(x0 + sw - cw2, y, cw2, 34.0, 8.0, PANEL);
+                self.txtext.draw(can, F::Mono, 14.0, x0 + sw - cw2 + 14.0, y + 19.0, DIM, &count);
+                let y = y + 44.0;
+                let y = self.button(can, x0, y, sw, 46.0, 17.0, &self.t("Открыть папку модов", "Open the mods folder"), "open-mods", false);
+                for (i, line) in self.txtext.wrap(F::Reg, 12.5, &self.t("Fabric-моды под версию игры (26.3): Simple Voice Chat - голосовой чат (на funtime.su уже стоит серверная часть), и другие. Jar-файлы кладутся в cursed-recode/mods.", "Fabric mods for the game's version (26.3): Simple Voice Chat - voice chat (funtime.su already has the server side), and others. Jar files go into cursed-recode/mods."), sw).into_iter().enumerate() {
+                    self.txtext.draw(can, F::Reg, 12.5, x0, y + 6.0 + i as f32 * 18.0, DIM, &line);
+                }
                 let _ = h;
             }
         }
