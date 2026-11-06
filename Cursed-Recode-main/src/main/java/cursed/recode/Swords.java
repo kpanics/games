@@ -39,31 +39,40 @@ public final class Swords {
         return FabricLoader.getInstance().getGameDir().toAbsolutePath().normalize().resolve("cursed-recode");
     }
 
-    /** A model chosen in the menu («Vanilla»: the game's own swords back): the pack written, the resources reloaded. */
+    /** A model chosen in the menu («Vanilla»: the game's own swords back): the pack written — in the background, for
+     * writing files is not the game's thread's work — and the resources reloaded on the game's thread after. */
     public static void apply(Minecraft mc, String name) {
         if (!on()) {
             return;
         }
-        try {
-            Path pack = base().resolve("pack");
-            if (name.isEmpty() || name.equals("Vanilla")) {
-                delete(pack);
-                write(base().resolve("swords.txt"), "Vanilla");
-            } else {
-                Path model = base().resolve("swords").resolve(name);
-                if (!Files.isRegularFile(model.resolve("model.json"))) {
-                    LOGGER.warn("[swords] {} has no model.json: the game's own swords", model);
-                    delete(pack);
-                    write(base().resolve("swords.txt"), "Vanilla");
-                } else {
-                    make(pack, name, model);
-                    write(base().resolve("swords.txt"), name);
+        String pick = name.isEmpty() || name.equals("Vanilla") ? "Vanilla" : name;
+        Thread worker = new Thread(() -> {
+            synchronized (Swords.class) {
+                try {
+                    Path pack = base().resolve("pack");
+                    if (pick.equals("Vanilla")) {
+                        delete(pack);
+                        write(base().resolve("swords.txt"), "Vanilla");
+                    } else {
+                        Path model = base().resolve("swords").resolve(pick);
+                        if (!Files.isRegularFile(model.resolve("model.json"))) {
+                            LOGGER.warn("[swords] {} has no model.json: the game's own swords", model);
+                            delete(pack);
+                            write(base().resolve("swords.txt"), "Vanilla");
+                        } else {
+                            make(pack, pick, model);
+                            write(base().resolve("swords.txt"), pick);
+                        }
+                    }
+                } catch (IOException e) {
+                    LOGGER.error("[swords] the pack", e);
                 }
             }
-        } catch (IOException e) {
-            LOGGER.error("[swords] the pack", e);
-        }
-        mc.reloadResourcePacks();
+            // the reload is the game's own (its thread); scheduled from here, it runs on the game's loop
+            mc.schedule(mc::reloadResourcePacks);
+        }, "Cursed swords");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     /** The pack of one model: the game's swords point at it, it and its pictures under the client's own name. */

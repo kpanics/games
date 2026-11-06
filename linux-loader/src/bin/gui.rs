@@ -419,6 +419,8 @@ enum ToUi {
     SignIn(Result<lib::Auth, String>),
     Register(Result<lib::Auth, String>),
     Me(Result<lib::Me, String>),
+    /// Размер папки игры и число модов посчитано (в потоке, чтобы окно не стояло).
+    Folder(u64, usize),
 }
 
 /// Вся картина окна: вкладка, настройки, прогресс, кнопки последнего кадра.
@@ -467,6 +469,8 @@ struct Ui {
     bg_h: usize,
     /// Размер папки — считается один раз на заход в раздел, а не каждым кадром.
     folder_bytes: Option<u64>,
+    /// Число модов (с ним же, в потоке).
+    mods_n: usize,
     log: lib::LogFollow,
 }
 
@@ -675,6 +679,11 @@ impl Ui {
                         }
                     }
                 },
+                Ok(ToUi::Folder(b, n)) => {
+                    self.folder_bytes = Some(b);
+                    self.mods_n = n;
+                    changed = true;
+                }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -760,7 +769,7 @@ impl Ui {
             }
             _ => self.settings.memory = ((2048.0 + k * (16384.0 - 2048.0)) / 256.0).round() as u32 * 256,
         }
-        self.settings.save(&self.home);
+        // на диск - когда слайдер отпустят (mouse release), не на каждое движение мыши
     }
 
     fn on_action(&mut self, action: &str) {
@@ -851,9 +860,13 @@ impl Ui {
             "sec0" => self.section = 0,
             "sec1" => self.section = 1,
             "sec2" => {
-                if self.folder_bytes.is_none() {
-                    self.folder_bytes = Some(lib::dir_bytes(&self.home));
-                }
+                // размер папки и моды - в потоке: папка игры - гигабайты, окно не должно стоять
+                // (и каждый заход, чтобы после проверки файлов и новых модов числа были свежими)
+                self.folder_bytes = None;
+                let (tx, home) = (self.tx.clone(), self.home.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(ToUi::Folder(lib::dir_bytes(&home), lib::mods_jars(&home).len()));
+                });
                 self.section = 2;
             }
             "open-folder" => {
@@ -1391,7 +1404,10 @@ impl Ui {
             }
             _ => {
                 self.txtext.draw(can, F::Reg, 15.0, x0, y + 10.0, TEXT, &self.t("Папка игры", "The game's folder"));
-                let size = format!("{:.1} GB", self.folder_bytes.unwrap_or(0) as f64 / 1073741824.0);
+                let size = match self.folder_bytes {
+                    Some(b) => format!("{:.1} GB", b as f64 / 1073741824.0),
+                    None => "…".to_string(),
+                };
                 let szw = self.txtext.width(F::Mono, 14.0, &size);
                 self.txtext.draw(can, F::Mono, 14.0, x0 + sw - szw, y + 10.0, DIM, &size);
                 self.txtext.draw(can, F::Mono, 14.0, x0, y + 42.0, DIM, &self.home.to_string_lossy());
@@ -1401,7 +1417,7 @@ impl Ui {
                 let y = self.button(can, x0, y, sw, 46.0, 17.0, &self.t("Сменить папку", "Another folder"), "change-folder", false);
                 let y = y + 30.0;
                 self.txtext.draw(can, F::Reg, 15.0, x0, y + 10.0, TEXT, &self.t("Моды (Fabric)", "Mods (Fabric)"));
-                let n = lib::mods_jars(&self.home).len();
+                let n = self.mods_n;
                 let count = if n == 0 {
                     self.t("пусто", "none")
                 } else {
@@ -1593,7 +1609,11 @@ impl ApplicationHandler<Ticker> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // слайдер могли тащить в этот момент - его значение сохраняется и здесь
+                self.ui.settings.save(&self.ui.home);
+                event_loop.exit();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let k = window_scale();
                 self.ui.mouse = (position.x as f32 / k, position.y as f32 / k);
@@ -1614,6 +1634,10 @@ impl ApplicationHandler<Ticker> for App {
                 redraw();
             }
             WindowEvent::MouseInput { state: ElementState::Released, .. } => {
+                if self.ui.drag {
+                    // слайдер отпущен - вот теперь настройки на диск
+                    self.ui.settings.save(&self.ui.home);
+                }
                 self.ui.drag = false;
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1722,6 +1746,7 @@ fn main() {
         bg_w: 0,
         bg_h: 0,
         folder_bytes: None,
+        mods_n: 0,
         log,
     };
     // папка уже выбрана - сразу к делу: проверить файлы и в меню
